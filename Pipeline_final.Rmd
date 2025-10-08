@@ -1,0 +1,2243 @@
+---
+title: "pipeline_final"
+author: "Bethany"
+date: "2025-10-07"
+output: html_document
+---
+# load necessary packages
+```{r}
+suppressPackageStartupMessages({
+  library(readxl)
+  library(dplyr)
+  library(tidyr)
+  library(stringr)
+  library(purrr)
+  library(readr)
+  library(openxlsx)
+  library(stringdist)
+  library(lme4)
+  library(lmerTest)
+  library(ggplot2)
+  library(ggrepel)
+  library(lubridate)
+  library(gridExtra)
+  library(interactions)
+  library(ggnewscale)
+  library(RColorBrewer)
+  library(tidygraph)
+  library(ggraph)
+  library(DT)
+  library(igraph)
+   library(tibble)
+  library(ggforce)
+})
+
+```
+
+```{r}
+# =============================================================================
+# DATA MODEL OVERVIEW
+# =============================================================================
+# Tables produced by this pipeline:
+#   • node_level_long               — alter-level; one row per relationship (alter).
+#   • ego_level_network_summary     — child-level; one row per child (ego).
+#   • activity_level_long           — activity-level; one row per activity (per child).
+```
+
+# load data 
+```{r load data}
+# (get rid of the metadata rows from Qualtrics)
+df <- read_csv(
+  'path to your csv',
+  show_col_types = FALSE
+) %>%
+  slice(-(1:2)) 
+```
+
+
+# 1: Building ego_level_network_summary: Phase 1 (Demographics, and daycare)
+```{r ego_demographics_in_ego_level_network_summary}
+
+ego_level_network_summary <- df %>%
+  mutate(
+    # --- Merge childcare "other" text where present ---
+    childcare_type = ifelse(!is.na(childcare_type_8_TEXT) & childcare_type_8_TEXT != "",
+                            ifelse(childcare_type == "" | is.na(childcare_type),
+                                   childcare_type_8_TEXT,
+                                   paste(childcare_type, childcare_type_8_TEXT, sep = ", ")),
+                            childcare_type),
+
+    # --- Childcare race: keep main selection; store free text separately ---
+    childcare_race_other = ifelse(!is.na(childcare_race_7_TEXT) & trimws(childcare_race_7_TEXT) != "",
+                                  trimws(childcare_race_7_TEXT), NA_character_),
+
+    # --- Child gender: prefer text-entry (Other) when present ---
+    child_gender = ifelse(!is.na(child_gender_3_TEXT) & trimws(child_gender_3_TEXT) != "",
+                          trimws(child_gender_3_TEXT), child_gender),
+
+    # --- Child race: keep main selection; store free text separately ---
+    child_race_other = ifelse(!is.na(child_race_6_TEXT) & trimws(child_race_6_TEXT) != "",
+                              trimws(child_race_6_TEXT), NA_character_),
+
+    # --- Child language categorization + cleanup (moved earlier so it's available for select) ---
+    child_lang_categorized = dplyr::case_when(
+      stringr::str_detect(child_lang, "^\\s*[Mm]ultilingual\\s*:") ~ "multilingual",
+      stringr::str_detect(child_lang, "^\\s*[Bb]ilingual\\s*:")    ~ "bilingual",
+      stringr::str_detect(child_lang, "^\\s*[Ee]xposure\\s*:")     ~ "exposure",
+      stringr::str_to_lower(stringr::str_squish(child_lang)) == "english" ~ "monolingual",
+      TRUE ~ NA_character_
+    ),
+    child_lang = gsub("^\\s*(?i:multilingual|bilingual|exposure)\\s*:\\s*", "",
+                      child_lang, perl = TRUE),
+    child_lang = ifelse(child_lang == "", NA_character_, child_lang)
+  ) %>%
+  rowwise() %>%
+  mutate(
+    # --- Child accent: build two outputs per row ---
+    child_accent_categorized = {
+      s <- tolower(as.character(child_accent))
+      if (is.na(s) || trimws(s) == "") {
+        NA_character_
+      } else {
+        labs <- character(0)
+        if (grepl("european", s)) labs <- c(labs, "European")
+        if (grepl("asian", s))    labs <- c(labs, "Asian")
+        if (grepl("regional", s)) labs <- c(labs, "Regional U.S.")
+        if (length(labs) == 0) NA_character_ else paste(labs, collapse = ", ")
+      }
+    },
+    child_accent_specific = {
+      s <- tolower(as.character(child_accent))
+      specs <- character(0)
+      if (!is.na(s) && grepl("british", s))  specs <- c(specs, "British")
+      if (!is.na(s) && grepl("hispanic", s)) specs <- c(specs, "Hispanic")
+      t3 <- trimws(as.character(child_accent_3_TEXT)); if (!is.na(t3) && nzchar(t3)) specs <- c(specs, t3)
+      t4 <- trimws(as.character(child_accent_4_TEXT)); if (!is.na(t4) && nzchar(t4)) specs <- c(specs, t4)
+      t5 <- trimws(as.character(child_accent_5_TEXT)); if (!is.na(t5) && nzchar(t5)) specs <- c(specs, t5)
+      t6 <- trimws(as.character(child_accent_6_TEXT)); if (!is.na(t6) && nzchar(t6)) specs <- c(specs, t6)
+      specs <- unique(specs)
+      if (length(specs) == 0) NA_character_ else paste(specs, collapse = "; ")
+    },
+
+    # --- Round to whole numbers ---
+    childcare_start_age = suppressWarnings(round(as.numeric(childcare_start_age), 0)),
+    childcare_size      = suppressWarnings(round(as.numeric(childcare_size), 0))
+  ) %>%
+  ungroup() %>%
+  select(
+    ChildID, child_name, EndDate, Finished,
+    birthdate_1, age_in_months_1,
+    child_gender, child_race, child_race_other, child_race_detail,
+    child_lang, child_lang_categorized,
+    child_accent_categorized, child_accent_specific,
+    child_zipcode,
+    childcare_yn, childcare_type,
+    childcare_start_age, childcare_size, childcare_child_age,
+    childcare_gender, childcare_race, childcare_race_other,
+    childcare_lang,
+    name_filloutsurvey_1
+  ) %>%
+  rename(
+    child_birthdate   = birthdate_1,
+    child_age_in_months = age_in_months_1,
+    survey_respondent = name_filloutsurvey_1
+  ) %>%
+  rename(
+    survey_enddate = EndDate,
+    survey_completion = Finished
+  ) %>%
+  mutate(
+    # --- Fix survey_enddate to MM/DD/YYYY ---
+    survey_enddate = {
+      end_num <- suppressWarnings(as.numeric(survey_enddate))
+      out <- rep(NA_character_, length(survey_enddate))
+
+      # Numeric (Excel serial) -> Date
+      idx_num <- !is.na(end_num)
+      if (any(idx_num)) {
+        out[idx_num] <- format(as.Date(end_num[idx_num], origin = "1899-12-30"), "%m/%d/%Y")
+      }
+
+      # Non-numeric -> try ymd_hms, then ymd
+      idx_chr <- !idx_num
+      if (any(idx_chr)) {
+        dt <- suppressWarnings(lubridate::ymd_hms(survey_enddate[idx_chr], tz = "UTC"))
+        miss <- is.na(dt)
+        if (any(miss)) {
+          dt[miss] <- suppressWarnings(lubridate::ymd(survey_enddate[idx_chr][miss], tz = "UTC"))
+        }
+        out[idx_chr] <- format(as.Date(dt), "%m/%d/%Y")
+      }
+      out
+    },
+
+    # --- Clean childcare_type: remove examples in (...) ---
+    childcare_type = {
+      s <- childcare_type
+      s <- gsub("\\s*\\([^)]*\\)", "", s, perl = TRUE)  # drop (…)
+      parts <- strsplit(s, ",", fixed = TRUE)
+      vapply(parts, function(v) {
+        v <- trimws(v)
+        v <- v[nzchar(v)]
+        if (!length(v)) return(NA_character_)
+        seen <- character(0)
+        for (t in v) if (!(t %in% seen)) seen <- c(seen, t)
+        paste(seen, collapse = ", ")
+      }, character(1))
+    },
+
+    # --- Child language categorization + cleanup ---
+    child_lang_categorized = dplyr::case_when(
+      stringr::str_detect(child_lang, "^\\s*[Mm]ultilingual\\s*:") ~ "multilingual",
+      stringr::str_detect(child_lang, "^\\s*[Bb]ilingual\\s*:")    ~ "bilingual",
+      stringr::str_detect(child_lang, "^\\s*[Ee]xposure\\s*:")     ~ "exposure",
+      stringr::str_to_lower(stringr::str_squish(child_lang)) == "english" ~ "monolingual",
+      TRUE ~ NA_character_
+    ),
+    child_lang = gsub("^\\s*(?i:multilingual|bilingual|exposure)\\s*:\\s*", "",
+                      child_lang, perl = TRUE),
+    child_lang = ifelse(child_lang == "", NA_character_, child_lang)
+  )
+
+```
+
+# 2: Node processing into node_level_long
+## helper functions cleaning data
+```{r}
+DIGITS_AGE <- 0
+
+# Safely pull a column; if missing, return NAs of the right type
+pull_safe <- function(df, col, type = "character") {
+  if (!col %in% names(df)) {
+    return(switch(
+      type,
+      "double"   = rep(NA_real_,    nrow(df)),
+      "integer"  = rep(NA_integer_, nrow(df)),
+      "logical"  = rep(NA,          nrow(df)),
+      "datetime" = rep(as.POSIXct(NA), nrow(df)),
+      rep(NA_character_, nrow(df))
+    ))
+  }
+  x <- df[[col]]
+  switch(
+    type,
+    "double"   = suppressWarnings(as.numeric(x)),
+    "integer"  = suppressWarnings(as.integer(x)),
+    "logical"  = as.logical(x),
+    "datetime" = suppressWarnings(as.POSIXct(x, tz = "UTC")),
+    as.character(x)
+  )
+}
+
+# Turn blanks "" into NA (keep multiple-choice fields tidy)
+na_blank <- function(x) {
+  x <- as.character(x)
+  x[str_trim(x) == ""] <- NA_character_
+  x
+}
+
+# Parse flexible DOB → Date (used by sibling age in months)
+parse_dob_flexible <- function(x) {
+  x <- str_trim(as.character(x)); x[x == ""] <- NA_character_
+  x_norm <- str_replace_all(str_replace_all(x, "[.]", "-"), "/", "-")
+  dob <- suppressWarnings(lubridate::parse_date_time(
+    x_norm, orders = c("Ymd","dmY","mdY","Y-m","m-Y","Ym","my","Y"), tz="UTC", exact = FALSE
+  ))
+  only_year  <- !is.na(dob) & str_detect(x_norm, "^\\d{4}$")
+  dob[only_year] <- make_datetime(year(dob[only_year]), 6, 15, tz="UTC")
+  month_year <- !is.na(dob) & str_detect(x_norm, "^\\d{4}-\\d{1,2}$|^\\d{1,2}-\\d{4}$")
+  dob[month_year] <- make_datetime(year(dob[month_year]), month(dob[month_year]), 15, tz="UTC")
+  as.Date(dob)
+}
+
+# Parse Qualtrics EndDate string
+parse_enddate <- function(x) {
+  d1 <- suppressWarnings(ymd_hms(x, tz="UTC"))
+  d1_na <- is.na(d1)
+  if (any(d1_na)) d1[d1_na] <- suppressWarnings(ymd(x[d1_na], tz="UTC"))
+  d1
+}
+
+# Normalize yes/no style answers into 1/0/NA
+recode_yn_na <- function(x) {
+  x <- str_trim(str_to_lower(as.character(x)))
+  dplyr::case_when(
+    x %in% c("yes","y","1","true")  ~ 1,
+    x %in% c("no","n","0","false")  ~ 0,
+    x %in% c("does not apply","doesn’t apply","doesnt apply","na","n/a","","not applicable") ~ NA_real_,
+    TRUE ~ suppressWarnings(as.numeric(x))
+  )
+}
+
+# Hours per week → percent of week (168h)
+percent_of_week <- function(hours_vec) {
+  ifelse(!is.na(hours_vec), round(pmin((hours_vec / 168) * 100, 100), 0), NA_real_)
+}
+
+# Accent helpers must be defined before node processors use them
+accent_categorize_from <- function(main_choice) {
+  s <- tolower(as.character(main_choice))
+  if (is.na(s) || !nzchar(trimws(s))) return(NA_character_)
+  labs <- character(0)
+  if (grepl("european", s, ignore.case = TRUE)) labs <- c(labs, "European")
+  if (grepl("asian",    s, ignore.case = TRUE)) labs <- c(labs, "Asian")
+  if (grepl("regional", s, ignore.case = TRUE)) labs <- c(labs, "Regional U.S.")
+  if (!length(labs)) return(NA_character_)
+  paste(labs, collapse = ", ")
+}
+
+accent_specific_from <- function(main_choice, t3, t4, t5, t6) {
+  s <- tolower(as.character(main_choice))
+  specs <- character(0)
+  if (!is.na(s) && grepl("british",  s, ignore.case = TRUE)) specs <- c(specs, "British")
+  if (!is.na(s) && grepl("hispanic", s, ignore.case = TRUE)) specs <- c(specs, "Hispanic")
+  add_spec <- function(x) { x <- trimws(as.character(x)); if (!is.na(x) && nzchar(x)) specs <<- c(specs, x) }
+  add_spec(t3); add_spec(t4); add_spec(t5); add_spec(t6)
+  specs <- unique(specs)
+  if (!length(specs)) return(NA_character_)
+  paste(specs, collapse = "; ")
+}
+
+# ====== REPLACE your build_mapping_code with these two helpers ======
+sanitize_name_for_code <- function(x) {
+  # to character; empty -> "NA"; strip non-alphanumerics; collapse runs
+  s <- as.character(x)
+  s[is.na(s) | stringr::str_trim(s) == ""] <- "NA"
+  s <- gsub("[^A-Za-z0-9]+", "_", s)       # any punctuation/space -> underscore
+  s <- gsub("^_+|_+$", "", s)              # trim leading/trailing underscores
+  s <- gsub("_+", "_", s)                  # collapse multiple underscores
+  s
+}
+
+build_node_code <- function(prefix, idx, name_vec) {
+  paste0(prefix, as.integer(idx), "_", sanitize_name_for_code(name_vec))
+}
+
+# Ego fields pulled once per row block (Child-level info)
+ego_fields <- function(ego_level_network_summary) {
+  list(
+    ChildID           = na_blank(pull_safe(ego_level_network_summary, "ChildID")),
+    ego_age_in_months = suppressWarnings(as.numeric(pull_safe(ego_level_network_summary, "child_age_in_months", type="double"))),
+    ego_gender        = dplyr::coalesce(na_blank(pull_safe(ego_level_network_summary, "child_gender")),
+                                        na_blank(pull_safe(ego_level_network_summary, "child_gender_3_TEXT"))),
+    # Keep ego_race as the main selection only; do not append text
+    ego_race          = na_blank(pull_safe(ego_level_network_summary, "child_race")),
+    ego_language      = na_blank(pull_safe(ego_level_network_summary, "child_lang"))
+  )
+}
+
+# Vectorized cleaner: accepts a character vector; returns normalized, de-duplicated labels
+clean_context_vec <- function(x) {
+  if (is.null(x)) return(rep(NA_character_, 0))
+  x <- as.character(x)
+  
+  # Normalize whitespace & separators early
+  x <- str_replace_all(x, "[\r\n]+", " ")
+  x <- str_squish(x)
+  
+  # Expand Qualtrics tokens and loose activity variants to "Activity N"
+  x <- str_replace_all(x, "\\$\\{e://Field/Activity\\s*([0-9]{1,2})\\}", "Activity \\1")
+  x <- str_replace_all(x, "(?i)\\bactivity\\s*0*([1-7])\\b", "Activity \\1")
+  
+  # Canonicalize base contexts (case-insensitive)
+  at_home      <- str_detect(x, "(?i)\\bat\\s*home\\b")
+  daycare_any  <- str_detect(x, "(?i)\\bday\\s*care\\b|\\bdaycare\\b|\\bschool\\b")
+  ext_family   <- str_detect(x, "(?i)\\bextended\\s*family\\b")
+  
+  # Extract all "Activity N"
+  acts <- lapply(
+    str_extract_all(x, "\\bActivity\\s*([1-7])\\b"),
+    function(v) if (length(v)) unique(str_squish(v)) else character(0)
+  )
+  
+  out <- character(length(x))
+  for (i in seq_along(x)) {
+    tokens <- character(0)
+    if (isTRUE(at_home[i]))     tokens <- c(tokens, "At home")
+    if (isTRUE(daycare_any[i])) tokens <- c(tokens, "Daycare/School")
+    if (isTRUE(ext_family[i]))  tokens <- c(tokens, "Extended Family")
+    if (length(acts[[i]]))      tokens <- c(tokens, acts[[i]])
+    tokens <- unique(tokens)
+    out[i] <- if (length(tokens)) paste(tokens, collapse = ", ") else NA_character_
+  }
+  out
+}
+
+# Counter that tolerates comma OR semicolon, trims, and ignores empties
+count_contexts_vec <- function(ctx) {
+  if (is.null(ctx)) return(integer(0))
+  ctx <- as.character(ctx)
+  sapply(ctx, function(one) {
+    if (is.na(one) || !nzchar(str_squish(one))) return(0L)
+    parts <- str_split(one, "[,;]")[[1]]
+    parts <- str_squish(parts)
+    as.integer(sum(nzchar(parts)))
+  })
+}
+```
+## Processing node
+
+### ---- Sibling ----
+```{r sibling}
+process_sibling <- function(df, ego_level_network_summary, i) {
+  nm <- function(suf) paste0(i, "_sibling_", suf)
+  
+  # Columns
+  name_col <- nm("basic_1_1"); rel_col <- nm("basic_2_1")
+  live_col <- nm("liveathome")
+  week_total_col <- nm("week_hour")
+  wkday_col <- nm("hour_weekday_4"); wkend_col <- nm("hour_weekend_4")
+  age_col  <- nm("age")        # DOB string
+  gender_col <- nm("gender");  gender_txt_col <- nm("gender_2_TEXT")
+  race_col   <- nm("race");    race_txt_col   <- nm("race_6_TEXT")
+  acc_col    <- nm("accent");  acc3 <- nm("accent_3_TEXT"); acc4 <- nm("accent_4_TEXT"); acc5 <- nm("accent_5_TEXT"); acc6 <- nm("accent_6_TEXT"); acc_yn_col <- nm("accent_yn")
+  lang_col   <- nm("lang")
+  contact_col<- nm("contact"); context_col <- nm("context")
+  c1_col <- nm("closeness_comfort"); c2_col <- nm("closeness_name")
+  c3_col <- nm("closeness_play");    c4_col <- nm("closeness_pickup")
+  clarify_col <- nm("clarify_1"); mapping_col <- nm("mapping_306")
+  
+  # Pulls
+  raw_name    <- na_blank(pull_safe(df, name_col))
+  raw_rel     <- na_blank(pull_safe(df, rel_col))
+  live_raw    <- pull_safe(df, live_col)
+  week_total  <- pull_safe(df, week_total_col, type = "double")
+  wkday_raw   <- pull_safe(df, wkday_col, type = "double")
+  wkend_raw   <- pull_safe(df, wkend_col, type = "double")
+  age_raw     <- pull_safe(df, age_col)
+  gender_main <- na_blank(pull_safe(df, gender_col)); gender_text <- na_blank(pull_safe(df, gender_txt_col))
+  race_main   <- na_blank(pull_safe(df, race_col));   race_text   <- na_blank(pull_safe(df, race_txt_col))
+  lang_main   <- na_blank(pull_safe(df, lang_col))
+  acc_main    <- na_blank(pull_safe(df, acc_col))
+  acc_t3      <- na_blank(pull_safe(df, acc3)); acc_t4 <- na_blank(pull_safe(df, acc4)); acc_t5 <- na_blank(pull_safe(df, acc5)); acc_t6 <- na_blank(pull_safe(df, acc6))
+  acc_yn_raw  <- pull_safe(df, acc_yn_col)
+  contact_raw <- na_blank(pull_safe(df, contact_col))
+  context_raw <- na_blank(pull_safe(df, context_col))
+  c1_raw      <- pull_safe(df, c1_col); c2_raw <- pull_safe(df, c2_col)
+  c3_raw      <- pull_safe(df, c3_col); c4_raw <- pull_safe(df, c4_col)
+  clarify_raw <- suppressWarnings(as.integer(pull_safe(df, clarify_col)))
+  clarify_raw <- ifelse(is.na(clarify_raw), NA_integer_, pmax(clarify_raw - 1L, 0L))
+  mapping_raw <- na_blank(pull_safe(df, mapping_col))
+  
+  eg <- ego_fields(ego_level_network_summary)
+  
+  # Live-at-home normalization
+  live_norm <- dplyr::case_when(
+    str_to_lower(str_trim(as.character(live_raw))) %in% c("yes","y","1","true") ~ "yes",
+    str_to_lower(str_trim(as.character(live_raw))) %in% c("no","n","0","false") ~ "no",
+    TRUE ~ NA_character_
+  )
+  
+  # Weekly total (depends on live-at-home vs not)
+  node_weekly_hour_summarized <- ifelse(
+    live_norm == "yes",
+    (coalesce(wkday_raw, 0) * 5) + (coalesce(wkend_raw, 0) * 2),
+    ifelse(live_norm == "no", week_total, NA_real_)
+  )
+  node_weekly_hour_summarized[is.nan(node_weekly_hour_summarized)] <- NA_real_
+  node_weekly_hour_percent <- percent_of_week(node_weekly_hour_summarized)
+  
+  # Age in months
+  dob <- parse_dob_flexible(age_raw)
+  end <- parse_enddate(pull_safe(df, "EndDate")); end[is.na(end)] <- Sys.time()
+  node_age_in_months <- suppressWarnings(time_length(interval(dob, end), "month"))
+  node_age_in_months[is.infinite(node_age_in_months)] <- NA_real_
+  node_age_in_months[node_age_in_months < 0] <- NA_real_
+  node_age_in_months <- round(as.numeric(node_age_in_months), DIGITS_AGE)
+  
+  node_age_categorized <- dplyr::case_when(
+    !is.na(node_age_in_months) & node_age_in_months < 24   ~ "Younger than 2 years old",
+    !is.na(node_age_in_months) & node_age_in_months < 72   ~ "2-5 years old",
+    !is.na(node_age_in_months) & node_age_in_months < 156  ~ "6-12 years old",
+    !is.na(node_age_in_months) & node_age_in_months < 216  ~ "13-17 years old",
+    !is.na(node_age_in_months) & node_age_in_months >= 216 ~ "18 years old or older",
+    TRUE ~ NA_character_
+  )
+  
+  node_gender   <- dplyr::coalesce(gender_main, gender_text)
+  node_race     <- race_main
+  node_race_other <- ifelse(!is.na(race_text) & trimws(race_text) != "", race_text, NA_character_)
+  node_language <- lang_main
+  
+  # Closeness
+  node_closeness_comfort <- recode_yn_na(c1_raw)
+  node_closeness_name    <- recode_yn_na(c2_raw)
+  node_closeness_play    <- recode_yn_na(c3_raw)
+  node_closeness_pickup  <- recode_yn_na(c4_raw)
+  node_closeness_score   <- rowSums(cbind(
+    ifelse(is.na(node_closeness_comfort),0,node_closeness_comfort),
+    ifelse(is.na(node_closeness_name),0,node_closeness_name),
+    ifelse(is.na(node_closeness_play),0,node_closeness_play),
+    ifelse(is.na(node_closeness_pickup),0,node_closeness_pickup)
+  ))
+  
+  # Context (clean + count) — FIXED
+  node_context       <- clean_context_vec(context_raw)
+  node_context_count <- count_contexts_vec(node_context)
+  
+  # Siblings are always kin
+  node_kin <- rep(1L, length(raw_name))
+  
+  mapping_code <- build_node_code("Sibling", i, raw_name)
+  
+  tibble::tibble(
+    ChildID = eg$ChildID,
+    ego_age_in_months = eg$ego_age_in_months,
+    ego_gender = eg$ego_gender,
+    ego_race   = eg$ego_race,
+    ego_language   = eg$ego_language,
+    node_accent_categorized = accent_categorize_from(acc_main),
+    node_accent_specific    = accent_specific_from(acc_main, acc_t3, acc_t4, acc_t5, acc_t6),
+    ego_accent_categories = na_blank(pull_safe(ego_level_network_summary, "child_accent_categorized")),
+    ego_accent_specific   = na_blank(pull_safe(ego_level_network_summary, "child_accent_specific")),
+    
+    node_type  = "Sibling",
+    node_index = i,
+    node_name  = raw_name,
+    node_relationship      = raw_rel,
+    node_liveathome_or_not = live_norm,
+    
+    node_daily_hour_weekday = wkday_raw,
+    node_daily_hour_weekend = wkend_raw,
+    node_weekly_hour        = week_total,
+    node_weekly_hour_summarized = node_weekly_hour_summarized,
+    node_weekly_hour_percent    = node_weekly_hour_percent,
+    
+    node_age_in_months   = node_age_in_months,
+    node_age_categorized = node_age_categorized,
+    
+    node_gender = node_gender,
+    node_race   = node_race,
+    node_race_other = node_race_other,
+    node_language        = node_language,
+    node_mode_of_contact = contact_raw,
+    node_context         = node_context,
+    node_context_count   = node_context_count,
+    
+    node_kin = node_kin,
+    
+    node_closeness_comfort = node_closeness_comfort,
+    node_closeness_name    = node_closeness_name,
+    node_closeness_play    = node_closeness_play,
+    node_closeness_pickup  = node_closeness_pickup,
+    node_closeness_score   = node_closeness_score,
+    
+    node_clarify = clarify_raw,
+    node_mapping = mapping_raw,
+    node_mapping_code = mapping_code
+  ) %>% dplyr::filter(!(is.na(node_name) & is.na(node_relationship)))
+}
+```
+
+### ---- Live-at-home (non-sibling) ----
+```{r liveathome}
+process_liveathome <- function(df, ego_level_network_summary, i) {
+  lm <- function(suf) paste0(i, "_liveathome_", suf)
+  name_col <- lm("basic_1_1"); rel_col <- lm("basic_2_1")
+  wkday_col <- lm("hour_weekday_4"); wkend_col <- lm("hour_weekend_4")
+  age_col <- lm("age")                       # categorical, same as Teacher
+  kin_col <- lm("kin")
+  gender_col <- lm("gender"); gender_txt_col <- lm("gender_2_TEXT")
+  race_col <- lm("race");     race_txt_col   <- lm("race_6_TEXT")
+  acc_col  <- lm("accent");   acc3 <- lm("accent_3_TEXT"); acc4 <- lm("accent_4_TEXT"); acc5 <- lm("accent_5_TEXT"); acc6 <- lm("accent_6_TEXT"); acc_yn_col <- lm("accent_yn")
+  lang_col <- lm("lang")
+  contact_col <- lm("contact"); context_col <- lm("context")
+  c1_col <- lm("closeness_comfort"); c2_col <- lm("closeness_name")
+  c3_col <- lm("closeness_play");    c4_col <- lm("closeness_pickup")
+  clarify_col <- lm("clarify_1");      mapping_col <- lm("mapping_306")
+  
+  raw_name  <- na_blank(pull_safe(df, name_col))
+  raw_rel   <- na_blank(pull_safe(df, rel_col))
+  wkday_raw <- pull_safe(df, wkday_col, type="double")
+  wkend_raw <- pull_safe(df, wkend_col, type="double")
+  age_raw   <- na_blank(pull_safe(df, age_col))
+  kin_raw   <- pull_safe(df, kin_col)
+  gender_main <- na_blank(pull_safe(df, gender_col)); gender_text <- na_blank(pull_safe(df, gender_txt_col))
+  race_main   <- na_blank(pull_safe(df, race_col));   race_text   <- na_blank(pull_safe(df, race_txt_col))
+  lang_main   <- na_blank(pull_safe(df, lang_col))
+  acc_main    <- na_blank(pull_safe(df, acc_col))
+  acc_yn_raw  <- pull_safe(df, acc_yn_col)
+  acc_t3      <- na_blank(pull_safe(df, acc3)); acc_t4 <- na_blank(pull_safe(df, acc4)); acc_t5 <- na_blank(pull_safe(df, acc5)); acc_t6 <- na_blank(pull_safe(df, acc6))
+  contact_raw <- na_blank(pull_safe(df, contact_col))
+  context_raw <- na_blank(pull_safe(df, context_col))
+  c1_raw <- pull_safe(df, c1_col); c2_raw <- pull_safe(df, c2_col)
+  c3_raw <- pull_safe(df, c3_col); c4_raw <- pull_safe(df, c4_col)
+  clarify_raw <- suppressWarnings(as.integer(pull_safe(df, clarify_col)))
+  clarify_raw <- ifelse(is.na(clarify_raw), NA_integer_, pmax(clarify_raw - 1L, 0L))
+  mapping_raw <- na_blank(pull_safe(df, mapping_col))
+  
+  eg <- ego_fields(ego_level_network_summary)
+  
+  node_weekly_hour_summarized <- (coalesce(wkday_raw, 0) * 5) + (coalesce(wkend_raw, 0) * 2)
+  node_weekly_hour_summarized[is.nan(node_weekly_hour_summarized)] <- NA_real_
+  node_weekly_hour_percent <- percent_of_week(node_weekly_hour_summarized)
+  
+  node_age_in_months   <- NA_real_
+  node_age_categorized <- age_raw
+  
+  node_gender   <- dplyr::coalesce(gender_main, gender_text)
+  node_race     <- race_main
+  node_race_other <- ifelse(!is.na(race_text) & trimws(race_text) != "", race_text, NA_character_)
+  node_language <- lang_main
+  node_kin      <- recode_yn_na(kin_raw)
+  
+  node_closeness_comfort <- recode_yn_na(c1_raw)
+  node_closeness_name    <- recode_yn_na(c2_raw)
+  node_closeness_play    <- recode_yn_na(c3_raw)
+  node_closeness_pickup  <- recode_yn_na(c4_raw)
+  node_closeness_score   <- rowSums(cbind(
+    ifelse(is.na(node_closeness_comfort),0,node_closeness_comfort),
+    ifelse(is.na(node_closeness_name),0,node_closeness_name),
+    ifelse(is.na(node_closeness_play),0,node_closeness_play),
+    ifelse(is.na(node_closeness_pickup),0,node_closeness_pickup)
+  ))
+  
+  # FIXED
+  node_context       <- clean_context_vec(context_raw)
+  node_context_count <- count_contexts_vec(node_context)
+  mapping_code <- build_node_code("Liveathome", i, raw_name)
+  
+  tibble::tibble(
+    ChildID = eg$ChildID,
+    ego_age_in_months = eg$ego_age_in_months,
+    ego_gender = eg$ego_gender,
+    ego_race   = eg$ego_race,
+    ego_language   = eg$ego_language,
+    ego_accent_categories = na_blank(pull_safe(ego_level_network_summary, "child_accent_categorized")),
+    ego_accent_specific   = na_blank(pull_safe(ego_level_network_summary, "child_accent_specific")),
+    
+    node_type  = "Liveathome",
+    node_index = i,
+    node_name  = raw_name,
+    node_relationship      = raw_rel,
+    node_liveathome_or_not = "yes",
+    
+    node_daily_hour_weekday     = wkday_raw,
+    node_daily_hour_weekend     = wkend_raw,
+    node_weekly_hour            = NA_real_,
+    node_weekly_hour_summarized = node_weekly_hour_summarized,
+    node_weekly_hour_percent    = node_weekly_hour_percent,
+    
+    node_age_in_months   = node_age_in_months,
+    node_age_categorized = node_age_categorized,
+    
+    node_gender          = node_gender,
+    node_race            = node_race,
+    node_race_other      = node_race_other,
+    node_language        = node_language,
+    node_have_accent     = {
+      v <- recode_yn_na(acc_yn_raw)
+      ifelse(is.na(v), NA_character_, ifelse(v == 1, "Yes", "No"))
+    },
+    node_accent_categorized = accent_categorize_from(acc_main),
+    node_accent_specific    = accent_specific_from(acc_main, acc_t3, acc_t4, acc_t5, acc_t6),
+    node_mode_of_contact = contact_raw,
+    node_context         = node_context,
+    node_context_count   = node_context_count,
+    
+    node_kin = node_kin,
+    
+    node_closeness_comfort = node_closeness_comfort,
+    node_closeness_name    = node_closeness_name,
+    node_closeness_play    = node_closeness_play,
+    node_closeness_pickup  = node_closeness_pickup,
+    node_closeness_score   = node_closeness_score,
+    
+    node_clarify = clarify_raw,
+    node_mapping = mapping_raw,
+    node_mapping_code = mapping_code
+  ) %>% dplyr::filter(!(is.na(node_name) & is.na(node_relationship)))
+}
+```
+
+### ---- Teacher ----
+```{r teacher}
+process_teacher <- function(df, ego_level_network_summary, i) {
+  tm <- function(suf) paste0(i, "_teacher_", suf)
+  
+  name_col <- tm("basic_1_1"); rel_col <- tm("basic_2_1")
+  week_col <- tm("hour");      kin_col <- tm("kin")
+  age_cat_col <- tm("age")
+  gender_col <- tm("gender");  gender_txt_col <- tm("gender_2_TEXT")
+  race_col   <- tm("race");    race_txt_col   <- tm("race_6_TEXT")
+  lang_col   <- tm("lang")
+  acc_col    <- tm("accent");  acc3 <- tm("accent_3_TEXT"); acc4 <- tm("accent_4_TEXT"); acc5 <- tm("accent_5_TEXT"); acc6 <- tm("accent_6_TEXT"); acc_yn_col <- tm("accent_yn")
+  contact_col<- tm("contact"); context_col <- tm("context")
+  c1_col <- tm("closeness_comfort"); c2_col <- tm("closeness_name")
+  c3_col <- tm("closeness_play");    c4_col <- tm("closeness_pickup")
+  clarify_col<- tm("clarify_1"); mapping_col <- tm("mapping_306")
+  
+  raw_name <- na_blank(pull_safe(df, name_col)); raw_rel <- na_blank(pull_safe(df, rel_col))
+  week_total <- pull_safe(df, week_col, type="double")
+  kin_raw <- pull_safe(df, kin_col)
+  age_cat_raw <- na_blank(pull_safe(df, age_cat_col))
+  gender_main <- na_blank(pull_safe(df, gender_col)); gender_text <- na_blank(pull_safe(df, gender_txt_col))
+  race_main <- na_blank(pull_safe(df, race_col));     race_text  <- na_blank(pull_safe(df, race_txt_col))
+  lang_main <- na_blank(pull_safe(df, lang_col))
+  contact_raw <- na_blank(pull_safe(df, contact_col)); context_raw <- na_blank(pull_safe(df, context_col))
+  c1_raw <- pull_safe(df, c1_col); c2_raw <- pull_safe(df, c2_col)
+  c3_raw <- pull_safe(df, c3_col); c4_raw <- pull_safe(df, c4_col)
+  clarify_raw <- suppressWarnings(as.integer(pull_safe(df, clarify_col)))
+  clarify_raw <- ifelse(is.na(clarify_raw), NA_integer_, pmax(clarify_raw - 1L, 0L))
+  mapping_raw <- na_blank(pull_safe(df, mapping_col))
+  
+  eg <- ego_fields(ego_level_network_summary)
+  
+  live_norm <- rep("no", length(raw_name))
+  node_weekly_hour <- week_total
+  node_weekly_hour_summarized <- week_total
+  node_weekly_hour_summarized[is.nan(node_weekly_hour_summarized)] <- NA_real_
+  node_weekly_hour_percent <- percent_of_week(node_weekly_hour_summarized)
+  
+  node_gender   <- dplyr::coalesce(gender_main, gender_text)
+  node_race     <- dplyr::coalesce(race_main,   race_text)
+  node_language <- lang_main
+  acc_yn_raw  <- pull_safe(df, acc_yn_col)
+  acc_main    <- na_blank(pull_safe(df, acc_col))
+  acc_t3      <- na_blank(pull_safe(df, acc3)); acc_t4 <- na_blank(pull_safe(df, acc4)); acc_t5 <- na_blank(pull_safe(df, acc5)); acc_t6 <- na_blank(pull_safe(df, acc6))
+  node_accent_categorized <- accent_categorize_from(acc_main)
+  node_accent_specific    <- accent_specific_from(acc_main, acc_t3, acc_t4, acc_t5, acc_t6)
+  node_kin      <- recode_yn_na(kin_raw)
+  
+  node_closeness_comfort <- recode_yn_na(c1_raw)
+  node_closeness_name    <- recode_yn_na(c2_raw)
+  node_closeness_play    <- recode_yn_na(c3_raw)
+  node_closeness_pickup  <- recode_yn_na(c4_raw)
+  node_closeness_score   <- rowSums(cbind(
+    ifelse(is.na(node_closeness_comfort),0,node_closeness_comfort),
+    ifelse(is.na(node_closeness_name),0,node_closeness_name),
+    ifelse(is.na(node_closeness_play),0,node_closeness_play),
+    ifelse(is.na(node_closeness_pickup),0,node_closeness_pickup)
+  ))
+  
+  # FIXED
+  node_context       <- clean_context_vec(context_raw)
+  node_context_count <- count_contexts_vec(node_context)
+  mapping_code <- build_node_code("Teacher", i, raw_name)
+  
+  tibble::tibble(
+    ChildID = eg$ChildID,
+    ego_age_in_months = eg$ego_age_in_months,
+    ego_gender = eg$ego_gender,
+    ego_race   = eg$ego_race,
+    ego_language   = eg$ego_language,
+    ego_accent_categories = na_blank(pull_safe(ego_level_network_summary, "child_accent_categorized")),
+    ego_accent_specific   = na_blank(pull_safe(ego_level_network_summary, "child_accent_specific")),
+    
+    node_type  = "Teacher",
+    node_index = i,
+    node_name  = raw_name,
+    node_relationship      = raw_rel,
+    node_liveathome_or_not = live_norm,
+    
+    node_daily_hour_weekday = NA_real_,
+    node_daily_hour_weekend = NA_real_,
+    node_weekly_hour        = node_weekly_hour,
+    node_weekly_hour_summarized = node_weekly_hour_summarized,
+    node_weekly_hour_percent    = node_weekly_hour_percent,
+    
+    node_age_in_months   = NA_real_,
+    node_age_categorized = age_cat_raw,
+    
+    node_gender = node_gender,
+    node_race   = node_race,
+    node_language        = node_language,
+    node_have_accent     = {
+      v <- recode_yn_na(acc_yn_raw)
+      ifelse(is.na(v), NA_character_, ifelse(v == 1, "Yes", "No"))
+    },
+    node_accent_categorized = node_accent_categorized,
+    node_accent_specific    = node_accent_specific,
+    node_mode_of_contact = contact_raw,
+    node_context         = node_context,
+    node_context_count   = node_context_count,
+    
+    node_kin = node_kin,
+    
+    node_closeness_comfort = node_closeness_comfort,
+    node_closeness_name    = node_closeness_name,
+    node_closeness_play    = node_closeness_play,
+    node_closeness_pickup  = node_closeness_pickup,
+    node_closeness_score   = node_closeness_score,
+    
+    node_clarify = clarify_raw,
+    node_mapping = mapping_raw,
+    node_mapping_code = mapping_code
+  ) %>% dplyr::filter(!(is.na(node_name) & is.na(node_relationship)))
+}
+```
+
+### ---- Schoolkid ----
+```{r schoolkid}
+process_schoolkid <- function(df, ego_level_network_summary, i) {
+  sm <- function(suf) paste0(i, "_schoolkid_", suf)
+  
+  name_col <- sm("basic_1_1"); rel_col <- sm("basic_2_1")
+  week_col <- sm("hour"); kin_col <- sm("kin")
+  age_cat_col <- sm("age")
+  gender_col <- sm("gender"); gender_txt_col <- sm("gender_2_TEXT")
+  race_col <- sm("race");     race_txt_col  <- sm("race_6_TEXT")
+  lang_col <- sm("lang")
+  acc_col  <- sm("accent");   acc3 <- sm("accent_3_TEXT"); acc4 <- sm("accent_4_TEXT"); acc5 <- sm("accent_5_TEXT"); acc6 <- sm("accent_6_TEXT"); acc_yn_col <- sm("accent_yn")
+  contact_col <- sm("contact"); context_col <- sm("context")
+  c1_col <- sm("closeness_comfort"); c2_col <- sm("closeness_name")
+  c3_col <- sm("closeness_play");    c4_col <- sm("closeness_pickup")
+  clarify_col <- sm("clarify_1"); mapping_col <- sm("mapping_306")
+  
+  raw_name <- na_blank(pull_safe(df, name_col)); raw_rel <- na_blank(pull_safe(df, rel_col))
+  week_total <- pull_safe(df, week_col, type="double")
+  kin_raw <- pull_safe(df, kin_col)
+  age_cat_raw <- na_blank(pull_safe(df, age_cat_col))
+  gender_main <- na_blank(pull_safe(df, gender_col)); gender_text <- na_blank(pull_safe(df, gender_txt_col))
+  race_main <- na_blank(pull_safe(df, race_col));     race_text  <- na_blank(pull_safe(df, race_txt_col))
+  lang_main <- na_blank(pull_safe(df, lang_col))
+  contact_raw <- na_blank(pull_safe(df, contact_col)); context_raw <- na_blank(pull_safe(df, context_col))
+  acc_main    <- na_blank(pull_safe(df, acc_col))
+  acc_t3      <- na_blank(pull_safe(df, acc3)); acc_t4 <- na_blank(pull_safe(df, acc4)); acc_t5 <- na_blank(pull_safe(df, acc5)); acc_t6 <- na_blank(pull_safe(df, acc6))
+  acc_yn_raw  <- pull_safe(df, acc_yn_col)
+  c1_raw <- pull_safe(df, c1_col); c2_raw <- pull_safe(df, c2_col)
+  c3_raw <- pull_safe(df, c3_col); c4_raw <- pull_safe(df, c4_col)
+  clarify_raw <- suppressWarnings(as.integer(pull_safe(df, clarify_col)))
+  clarify_raw <- ifelse(is.na(clarify_raw), NA_integer_, pmax(clarify_raw - 1L, 0L))
+  mapping_raw <- na_blank(pull_safe(df, mapping_col))
+  
+  eg <- ego_fields(ego_level_network_summary)
+  
+  node_liveathome_or_not <- rep("no", length(raw_name))
+  node_weekly_hour <- week_total
+  node_weekly_hour_summarized <- week_total
+  node_weekly_hour_summarized[is.nan(node_weekly_hour_summarized)] <- NA_real_
+  node_weekly_hour_percent <- percent_of_week(node_weekly_hour_summarized)
+  
+  node_gender <- dplyr::coalesce(gender_main, gender_text)
+  node_race   <- race_main
+  node_race_other <- ifelse(!is.na(race_text) & trimws(race_text) != "", race_text, NA_character_)
+  node_language <- lang_main
+  node_kin      <- recode_yn_na(kin_raw)
+  
+  node_closeness_comfort <- recode_yn_na(c1_raw)
+  node_closeness_name    <- recode_yn_na(c2_raw)
+  node_closeness_play    <- recode_yn_na(c3_raw)
+  node_closeness_pickup  <- recode_yn_na(c4_raw)
+  node_closeness_score   <- rowSums(cbind(
+    ifelse(is.na(node_closeness_comfort),0,node_closeness_comfort),
+    ifelse(is.na(node_closeness_name),0,node_closeness_name),
+    ifelse(is.na(node_closeness_play),0,node_closeness_play),
+    ifelse(is.na(node_closeness_pickup),0,node_closeness_pickup)
+  ))
+  
+  # FIXED
+  node_context       <- clean_context_vec(context_raw)
+  node_context_count <- count_contexts_vec(node_context)
+  mapping_code <- build_node_code("Schoolkid", i, raw_name)
+  
+  tibble::tibble(
+    ChildID = eg$ChildID,
+    ego_age_in_months = eg$ego_age_in_months,
+    ego_gender = eg$ego_gender,
+    ego_race   = eg$ego_race,
+    ego_language   = eg$ego_language,
+    ego_accent_categories = na_blank(pull_safe(ego_level_network_summary, "child_accent_categorized")),
+    ego_accent_specific   = na_blank(pull_safe(ego_level_network_summary, "child_accent_specific")),
+    
+    node_type  = "Schoolkid",
+    node_index = i,
+    node_name  = raw_name,
+    node_relationship      = raw_rel,
+    node_liveathome_or_not = node_liveathome_or_not,
+    
+    node_daily_hour_weekday = NA_real_,
+    node_daily_hour_weekend = NA_real_,
+    node_weekly_hour        = node_weekly_hour,
+    node_weekly_hour_summarized = node_weekly_hour_summarized,
+    node_weekly_hour_percent    = node_weekly_hour_percent,
+    
+    node_age_in_months   = NA_real_,
+    node_age_categorized = age_cat_raw,
+    
+    node_gender = node_gender,
+    node_race   = node_race,
+    node_race_other = node_race_other,
+    node_language        = node_language,
+    node_have_accent     = {
+      v <- recode_yn_na(acc_yn_raw)
+      ifelse(is.na(v), NA_character_, ifelse(v == 1, "Yes", "No"))
+    },
+    node_accent_categorized = accent_categorize_from(acc_main),
+    node_accent_specific    = accent_specific_from(acc_main, acc_t3, acc_t4, acc_t5, acc_t6),
+    node_mode_of_contact = contact_raw,
+    node_context         = node_context,
+    node_context_count   = node_context_count,
+    
+    node_kin = node_kin,
+    
+    node_closeness_comfort = node_closeness_comfort,
+    node_closeness_name    = node_closeness_name,
+    node_closeness_play    = node_closeness_play,
+    node_closeness_pickup  = node_closeness_pickup,
+    node_closeness_score   = node_closeness_score,
+    
+    node_clarify = clarify_raw,
+    node_mapping = mapping_raw,
+    node_mapping_code = mapping_code
+  ) %>% dplyr::filter(!(is.na(node_name) & is.na(node_relationship)))
+}
+```
+
+### ---- Caregiver ----
+```{r caregiver}
+
+process_caregiver <- function(df, ego_level_network_summary, i) {
+  cm <- function(suf) paste0(i, "_caregiver_", suf)
+  
+  name_col <- cm("basic_1_1"); rel_col <- cm("basic_2_1")
+  week_col <- cm("hour");       kin_col <- cm("kin")
+  age_cat_col <- cm("age")
+  gender_col <- cm("gender"); gender_txt_col <- cm("gender_2_TEXT")
+  race_col <- cm("race");     race_txt_col  <- cm("race_6_TEXT")
+  lang_col <- cm("lang")
+  acc_col  <- cm("accent");   acc3 <- cm("accent_3_TEXT"); acc4 <- cm("accent_4_TEXT"); acc5 <- cm("accent_5_TEXT"); acc6 <- cm("accent_6_TEXT"); acc_yn_col <- cm("accent_yn")
+  contact_col <- cm("contact"); context_col <- cm("context")
+  c1_col <- cm("closeness_comfort"); c2_col <- cm("closeness_name")
+  c3_col <- cm("closeness_play");    c4_col <- cm("closeness_pickup")
+  clarify_col <- cm("clarify_1"); mapping_col <- cm("mapping_306")
+  
+  raw_name <- na_blank(pull_safe(df, name_col)); raw_rel <- na_blank(pull_safe(df, rel_col))
+  week_total <- pull_safe(df, week_col, type="double")
+  kin_raw <- pull_safe(df, kin_col)
+  age_cat_raw <- na_blank(pull_safe(df, age_cat_col))
+  gender_main <- na_blank(pull_safe(df, gender_col)); gender_text <- na_blank(pull_safe(df, gender_txt_col))
+  race_main <- na_blank(pull_safe(df, race_col));     race_text  <- na_blank(pull_safe(df, race_txt_col))
+  lang_main <- na_blank(pull_safe(df, lang_col))
+  contact_raw <- na_blank(pull_safe(df, contact_col)); context_raw <- na_blank(pull_safe(df, context_col))
+  acc_main    <- na_blank(pull_safe(df, acc_col))
+  acc_t3      <- na_blank(pull_safe(df, acc3)); acc_t4 <- na_blank(pull_safe(df, acc4)); acc_t5 <- na_blank(pull_safe(df, acc5)); acc_t6 <- na_blank(pull_safe(df, acc6))
+  acc_yn_raw  <- pull_safe(df, acc_yn_col)
+  c1_raw <- pull_safe(df, c1_col); c2_raw <- pull_safe(df, c2_col)
+  c3_raw <- pull_safe(df, c3_col); c4_raw <- pull_safe(df, c4_col)
+  clarify_raw <- suppressWarnings(as.integer(pull_safe(df, clarify_col)))
+  clarify_raw <- ifelse(is.na(clarify_raw), NA_integer_, pmax(clarify_raw - 1L, 0L))
+  mapping_raw <- na_blank(pull_safe(df, mapping_col))
+  
+  eg <- ego_fields(ego_level_network_summary)
+  
+  node_liveathome_or_not <- rep("no", length(raw_name))
+  node_weekly_hour <- week_total
+  node_weekly_hour_summarized <- week_total
+  node_weekly_hour_summarized[is.nan(node_weekly_hour_summarized)] <- NA_real_
+  node_weekly_hour_percent <- percent_of_week(node_weekly_hour_summarized)
+  
+  node_gender <- dplyr::coalesce(gender_main, gender_text)
+  node_race   <- race_main
+  node_race_other <- ifelse(!is.na(race_text) & trimws(race_text) != "", race_text, NA_character_)
+  node_language <- lang_main
+  node_kin      <- recode_yn_na(kin_raw)
+  
+  node_closeness_comfort <- recode_yn_na(c1_raw)
+  node_closeness_name    <- recode_yn_na(c2_raw)
+  node_closeness_play    <- recode_yn_na(c3_raw)
+  node_closeness_pickup  <- recode_yn_na(c4_raw)
+  node_closeness_score   <- rowSums(cbind(
+    ifelse(is.na(node_closeness_comfort),0,node_closeness_comfort),
+    ifelse(is.na(node_closeness_name),0,node_closeness_name),
+    ifelse(is.na(node_closeness_play),0,node_closeness_play),
+    ifelse(is.na(node_closeness_pickup),0,node_closeness_pickup)
+  ))
+  
+  # FIXED
+  node_context       <- clean_context_vec(context_raw)
+  node_context_count <- count_contexts_vec(node_context)
+  mapping_code <- build_node_code("Caregiver", i, raw_name)
+  
+  tibble::tibble(
+    ChildID = eg$ChildID,
+    ego_age_in_months = eg$ego_age_in_months,
+    ego_gender = eg$ego_gender,
+    ego_race   = eg$ego_race,
+    ego_language   = eg$ego_language,
+    ego_accent_categories = na_blank(pull_safe(ego_level_network_summary, "child_accent_categorized")),
+    ego_accent_specific   = na_blank(pull_safe(ego_level_network_summary, "child_accent_specific")),
+    
+    node_type  = "Caregiver",
+    node_index = i,
+    node_name  = raw_name,
+    node_relationship      = raw_rel,
+    node_liveathome_or_not = node_liveathome_or_not,
+    
+    node_daily_hour_weekday = NA_real_,
+    node_daily_hour_weekend = NA_real_,
+    node_weekly_hour        = node_weekly_hour,
+    node_weekly_hour_summarized = node_weekly_hour_summarized,
+    node_weekly_hour_percent    = node_weekly_hour_percent,
+    
+    node_age_in_months   = NA_real_,
+    node_age_categorized = age_cat_raw,
+    
+    node_gender = node_gender,
+    node_race   = node_race,
+    node_race_other = node_race_other,
+    node_language        = node_language,
+    node_have_accent     = {
+      v <- recode_yn_na(acc_yn_raw)
+      ifelse(is.na(v), NA_character_, ifelse(v == 1, "Yes", "No"))
+    },
+    node_accent_categorized = accent_categorize_from(acc_main),
+    node_accent_specific    = accent_specific_from(acc_main, acc_t3, acc_t4, acc_t5, acc_t6),
+    node_mode_of_contact = contact_raw,
+    node_context         = node_context,
+    node_context_count   = node_context_count,
+    
+    node_kin = node_kin,
+    
+    node_closeness_comfort = node_closeness_comfort,
+    node_closeness_name    = node_closeness_name,
+    node_closeness_play    = node_closeness_play,
+    node_closeness_pickup  = node_closeness_pickup,
+    node_closeness_score   = node_closeness_score,
+    
+    node_clarify = clarify_raw,
+    node_mapping = mapping_raw,
+    node_mapping_code = mapping_code
+  ) %>% dplyr::filter(!(is.na(node_name) & is.na(node_relationship)))
+}
+```
+
+### ---- Extended family ----
+```{r extended family}
+process_extendedfamily <- function(df, ego_level_network_summary, i) {
+  em <- function(suf) paste0(i, "_ext_fam_", suf)
+  
+  name_col <- em("basic_1_1"); rel_col <- em("basic_2_1")
+  week_col <- em("hour"); kin_col <- em("kin")
+  age_cat_col <- em("age")
+  gender_col <- em("gender"); gender_txt_col <- em("gender_2_TEXT")
+  race_col <- em("race");     race_txt_col  <- em("race_6_TEXT")
+  lang_col <- em("lang")
+  acc_col  <- em("accent");   acc3 <- em("accent_3_TEXT"); acc4 <- em("accent_4_TEXT"); acc5 <- em("accent_5_TEXT"); acc6 <- em("accent_6_TEXT"); acc_yn_col <- em("accent_yn")
+  contact_col <- em("contact"); context_col <- em("context")
+  c1_col <- em("closeness_comfort"); c2_col <- em("closeness_name")
+  c3_col <- em("closeness_play");    c4_col <- em("closeness_pickup")
+  clarify_col <- em("clarify_1"); mapping_col <- em("mapping_306")
+  
+  raw_name <- na_blank(pull_safe(df, name_col)); raw_rel <- na_blank(pull_safe(df, rel_col))
+  week_total <- pull_safe(df, week_col, type="double")
+  kin_raw <- pull_safe(df, kin_col)
+  age_cat_raw <- na_blank(pull_safe(df, age_cat_col))
+  gender_main <- na_blank(pull_safe(df, gender_col)); gender_text <- na_blank(pull_safe(df, gender_txt_col))
+  race_main <- na_blank(pull_safe(df, race_col));     race_text  <- na_blank(pull_safe(df, race_txt_col))
+  lang_main <- na_blank(pull_safe(df, lang_col))
+  contact_raw <- na_blank(pull_safe(df, contact_col)); context_raw <- na_blank(pull_safe(df, context_col))
+  acc_main    <- na_blank(pull_safe(df, acc_col))
+  acc_t3      <- na_blank(pull_safe(df, acc3)); acc_t4 <- na_blank(pull_safe(df, acc4)); acc_t5 <- na_blank(pull_safe(df, acc5)); acc_t6 <- na_blank(pull_safe(df, acc6))
+  acc_yn_raw  <- pull_safe(df, acc_yn_col)
+  c1_raw <- pull_safe(df, c1_col); c2_raw <- pull_safe(df, c2_col)
+  c3_raw <- pull_safe(df, c3_col); c4_raw <- pull_safe(df, c4_col)
+  clarify_raw <- suppressWarnings(as.integer(pull_safe(df, clarify_col)))
+  clarify_raw <- ifelse(is.na(clarify_raw), NA_integer_, pmax(clarify_raw - 1L, 0L))
+  mapping_raw <- na_blank(pull_safe(df, mapping_col))
+  
+  eg <- ego_fields(ego_level_network_summary)
+  
+  node_liveathome_or_not <- rep("no", length(raw_name))
+  node_weekly_hour <- week_total
+  node_weekly_hour_summarized <- week_total
+  node_weekly_hour_summarized[is.nan(node_weekly_hour_summarized)] <- NA_real_
+  node_weekly_hour_percent <- percent_of_week(node_weekly_hour_summarized)
+  
+  node_gender <- dplyr::coalesce(gender_main, gender_text)
+  node_race   <- dplyr::coalesce(race_main,   race_text)
+  node_language <- lang_main
+  node_kin      <- recode_yn_na(kin_raw)
+  
+  node_closeness_comfort <- recode_yn_na(c1_raw)
+  node_closeness_name    <- recode_yn_na(c2_raw)
+  node_closeness_play    <- recode_yn_na(c3_raw)
+  node_closeness_pickup  <- recode_yn_na(c4_raw)
+  node_closeness_score   <- rowSums(cbind(
+    ifelse(is.na(node_closeness_comfort),0,node_closeness_comfort),
+    ifelse(is.na(node_closeness_name),0,node_closeness_name),
+    ifelse(is.na(node_closeness_play),0,node_closeness_play),
+    ifelse(is.na(node_closeness_pickup),0,node_closeness_pickup)
+  ))
+  
+  # FIXED
+  node_context       <- clean_context_vec(context_raw)
+  node_context_count <- count_contexts_vec(node_context)
+  mapping_code <- build_node_code("Extendedfamily", i, raw_name)
+  
+  tibble::tibble(
+    ChildID = eg$ChildID,
+    ego_age_in_months = eg$ego_age_in_months,
+    ego_gender = eg$ego_gender,
+    ego_race   = eg$ego_race,
+    ego_language   = eg$ego_language,
+    ego_accent_categories = na_blank(pull_safe(ego_level_network_summary, "child_accent_categorized")),
+    ego_accent_specific   = na_blank(pull_safe(ego_level_network_summary, "child_accent_specific")),
+    
+    node_type  = "Extended family",
+    node_index = i,
+    node_name  = raw_name,
+    node_relationship      = raw_rel,
+    node_liveathome_or_not = node_liveathome_or_not,
+    
+    node_daily_hour_weekday = NA_real_,
+    node_daily_hour_weekend = NA_real_,
+    node_weekly_hour        = node_weekly_hour,
+    node_weekly_hour_summarized = node_weekly_hour_summarized,
+    node_weekly_hour_percent    = node_weekly_hour_percent,
+    
+    node_age_in_months   = NA_real_,
+    node_age_categorized = age_cat_raw,
+    
+    node_gender = node_gender,
+    node_race   = node_race,
+    node_language        = node_language,
+    node_have_accent     = {
+      v <- recode_yn_na(acc_yn_raw)
+      ifelse(is.na(v), NA_character_, ifelse(v == 1, "Yes", "No"))
+    },
+    node_accent_categorized = accent_categorize_from(acc_main),
+    node_accent_specific    = accent_specific_from(acc_main, acc_t3, acc_t4, acc_t5, acc_t6),
+    node_mode_of_contact = contact_raw,
+    node_context         = node_context,
+    node_context_count   = node_context_count,
+    
+    node_kin = node_kin,
+    
+    node_closeness_comfort = node_closeness_comfort,
+    node_closeness_name    = node_closeness_name,
+    node_closeness_play    = node_closeness_play,
+    node_closeness_pickup  = node_closeness_pickup,
+    node_closeness_score   = node_closeness_score,
+    
+    node_clarify = clarify_raw,
+    node_mapping = mapping_raw,
+    node_mapping_code = mapping_code
+  ) %>% dplyr::filter(!(is.na(node_name) & is.na(node_relationship)))
+}
+```
+
+### ---- Anyone else ----
+```{r anyoneelse}
+process_anyoneelse <- function(df, ego_level_network_summary, i) {
+  am <- function(suf) paste0(i, "_othernode_", suf)
+  
+  name_col <- am("basic_1_1"); rel_col <- am("basic_2_1")
+  week_col <- am("hour"); kin_col <- am("kin")
+  age_cat_col <- am("age")
+  gender_col <- am("gender"); gender_txt_col <- am("gender_2_TEXT")
+  race_col <- am("race");     race_txt_col  <- am("race_6_TEXT")
+  lang_col <- am("lang")
+  acc_col  <- am("accent");   acc3 <- am("accent_3_TEXT"); acc4 <- am("accent_4_TEXT"); acc5 <- am("accent_5_TEXT"); acc6 <- am("accent_6_TEXT"); acc_yn_col <- am("accent_yn")
+  contact_col <- am("contact"); context_col <- am("context")
+  c1_col <- am("closeness_comfort"); c2_col <- am("closeness_name")
+  c3_col <- am("closeness_play");    c4_col <- am("closeness_pickup")
+  clarify_col <- am("clarify_1"); mapping_col <- am("mapping_306")
+  
+  raw_name <- na_blank(pull_safe(df, name_col)); raw_rel <- na_blank(pull_safe(df, rel_col))
+  week_total <- pull_safe(df, week_col, type="double")
+  kin_raw <- pull_safe(df, kin_col)
+  age_cat_raw <- na_blank(pull_safe(df, age_cat_col))
+  gender_main <- na_blank(pull_safe(df, gender_col)); gender_text <- na_blank(pull_safe(df, gender_txt_col))
+  race_main <- na_blank(pull_safe(df, race_col));     race_text  <- na_blank(pull_safe(df, race_txt_col))
+  lang_main <- na_blank(pull_safe(df, lang_col))
+  contact_raw <- na_blank(pull_safe(df, contact_col)); context_raw <- na_blank(pull_safe(df, context_col))
+  acc_main    <- na_blank(pull_safe(df, acc_col))
+  acc_t3      <- na_blank(pull_safe(df, acc3)); acc_t4 <- na_blank(pull_safe(df, acc4)); acc_t5 <- na_blank(pull_safe(df, acc5)); acc_t6 <- na_blank(pull_safe(df, acc6))
+  acc_yn_raw  <- pull_safe(df, acc_yn_col)
+  c1_raw <- pull_safe(df, c1_col); c2_raw <- pull_safe(df, c2_col)
+  c3_raw <- pull_safe(df, c3_col); c4_raw <- pull_safe(df, c4_col)
+  clarify_raw <- suppressWarnings(as.integer(pull_safe(df, clarify_col)))
+  clarify_raw <- ifelse(is.na(clarify_raw), NA_integer_, pmax(clarify_raw - 1L, 0L))
+  mapping_raw <- na_blank(pull_safe(df, mapping_col))
+  
+  eg <- ego_fields(ego_level_network_summary)
+  
+  node_liveathome_or_not <- rep("no", length(raw_name))
+  node_weekly_hour <- week_total
+  node_weekly_hour_summarized <- week_total
+  node_weekly_hour_summarized[is.nan(node_weekly_hour_summarized)] <- NA_real_
+  node_weekly_hour_percent <- percent_of_week(node_weekly_hour_summarized)
+  
+  node_gender <- dplyr::coalesce(gender_main, gender_text)
+  node_race   <- dplyr::coalesce(race_main,   race_text)
+  node_language <- lang_main
+  node_kin      <- recode_yn_na(kin_raw)
+  
+  node_closeness_comfort <- recode_yn_na(c1_raw)
+  node_closeness_name    <- recode_yn_na(c2_raw)
+  node_closeness_play    <- recode_yn_na(c3_raw)
+  node_closeness_pickup  <- recode_yn_na(c4_raw)
+  node_closeness_score   <- rowSums(cbind(
+    ifelse(is.na(node_closeness_comfort),0,node_closeness_comfort),
+    ifelse(is.na(node_closeness_name),0,node_closeness_name),
+    ifelse(is.na(node_closeness_play),0,node_closeness_play),
+    ifelse(is.na(node_closeness_pickup),0,node_closeness_pickup)
+  ))
+  
+  # FIXED
+  node_context       <- clean_context_vec(context_raw)
+  node_context_count <- count_contexts_vec(node_context)
+  mapping_code <- build_node_code("Anyoneelse", i, raw_name)
+  
+  tibble::tibble(
+    ChildID = eg$ChildID,
+    ego_age_in_months = eg$ego_age_in_months,
+    ego_gender = eg$ego_gender,
+    ego_race   = eg$ego_race,
+    ego_language   = eg$ego_language,
+    ego_accent_categories = na_blank(pull_safe(ego_level_network_summary, "child_accent_categorized")),
+    ego_accent_specific   = na_blank(pull_safe(ego_level_network_summary, "child_accent_specific")),
+    
+    node_type  = "Anyoneelse",
+    node_index = i,
+    node_name  = raw_name,
+    node_relationship      = raw_rel,
+    node_liveathome_or_not = node_liveathome_or_not,
+    
+    node_daily_hour_weekday = NA_real_,
+    node_daily_hour_weekend = NA_real_,
+    node_weekly_hour        = node_weekly_hour,
+    node_weekly_hour_summarized = node_weekly_hour_summarized,
+    node_weekly_hour_percent    = node_weekly_hour_percent,
+    
+    node_age_in_months   = NA_real_,
+    node_age_categorized = age_cat_raw,
+    
+    node_gender = node_gender,
+    node_race   = node_race,
+    node_language        = node_language,
+    node_have_accent     = {
+      v <- recode_yn_na(acc_yn_raw)
+      ifelse(is.na(v), NA_character_, ifelse(v == 1, "Yes", "No"))
+    },
+    node_accent_categorized = accent_categorize_from(acc_main),
+    node_accent_specific    = accent_specific_from(acc_main, acc_t3, acc_t4, acc_t5, acc_t6),
+    node_mode_of_contact = contact_raw,
+    node_context         = node_context,
+    node_context_count   = node_context_count,
+    
+    node_kin = node_kin,
+    
+    node_closeness_comfort = node_closeness_comfort,
+    node_closeness_name    = node_closeness_name,
+    node_closeness_play    = node_closeness_play,
+    node_closeness_pickup  = node_closeness_pickup,
+    node_closeness_score   = node_closeness_score,
+    
+    node_clarify = clarify_raw,
+    node_mapping = mapping_raw,
+    node_mapping_code = mapping_code
+  ) %>% dplyr::filter(!(is.na(node_name) & is.na(node_relationship)))
+}
+```
+
+### ---- Activity – Adult nodes ----
+```{r activity adult}
+process_activity_adult <- function(df, ego_level_network_summary, act_id, i) {
+  am <- function(suf) paste0(i, "_act", act_id, "_", suf)
+  
+  name_col <- am("basic_1_1"); rel_col <- am("basic_2_1")
+  week_col <- am("hour"); kin_col <- am("kin")
+  age_cat_col <- am("age")
+  gender_col <- am("gender"); gender_txt_col <- am("gender_2_TEXT")
+  race_col <- am("race");     race_txt_col  <- am("race_6_TEXT")
+  lang_col <- am("lang")
+  acc_col  <- am("accent");   acc3 <- am("accent_3_TEXT"); acc4 <- am("accent_4_TEXT"); acc5 <- am("accent_5_TEXT"); acc6 <- am("accent_6_TEXT"); acc_yn_col <- am("accent_yn")
+  contact_col <- am("contact"); context_col <- am("context")
+  c1_col <- am("closeness_comfort"); c2_col <- am("closeness_name")
+  c3_col <- am("closeness_play");    c4_col <- am("closeness_pickup")
+  clarify_col <- am("clarify_1"); mapping_col <- am("mapping_306")
+  act_label_col <- paste0("Activity_loading_", act_id)
+  
+  raw_name <- na_blank(pull_safe(df, name_col)); raw_rel <- na_blank(pull_safe(df, rel_col))
+  week_total <- pull_safe(df, week_col, type="double")
+  kin_raw <- pull_safe(df, kin_col)
+  age_cat_raw <- na_blank(pull_safe(df, age_cat_col))
+  gender_main <- na_blank(pull_safe(df, gender_col)); gender_text <- na_blank(pull_safe(df, gender_txt_col))
+  race_main <- na_blank(pull_safe(df, race_col));     race_text  <- na_blank(pull_safe(df, race_txt_col))
+  lang_main <- na_blank(pull_safe(df, lang_col))
+  contact_raw <- na_blank(pull_safe(df, contact_col)); context_raw <- na_blank(pull_safe(df, context_col))
+  acc_main    <- na_blank(pull_safe(df, acc_col))
+  acc_t3      <- na_blank(pull_safe(df, acc3)); acc_t4 <- na_blank(pull_safe(df, acc4)); acc_t5 <- na_blank(pull_safe(df, acc5)); acc_t6 <- na_blank(pull_safe(df, acc6))
+  acc_yn_raw  <- pull_safe(df, acc_yn_col)
+  c1_raw <- pull_safe(df, c1_col); c2_raw <- pull_safe(df, c2_col)
+  c3_raw <- pull_safe(df, c3_col); c4_raw <- pull_safe(df, c4_col)
+  clarify_raw <- suppressWarnings(as.integer(pull_safe(df, clarify_col)))
+  clarify_raw <- ifelse(is.na(clarify_raw), NA_integer_, pmax(clarify_raw - 1L, 0L))
+  mapping_raw <- na_blank(pull_safe(df, mapping_col))
+  act_label <- na_blank(pull_safe(df, act_label_col))
+  
+  eg <- ego_fields(ego_level_network_summary)
+  
+  node_liveathome_or_not <- rep("no", length(raw_name))
+  node_weekly_hour <- week_total
+  node_weekly_hour_summarized <- week_total
+  node_weekly_hour_summarized[is.nan(node_weekly_hour_summarized)] <- NA_real_
+  node_weekly_hour_percent <- percent_of_week(node_weekly_hour_summarized)
+  
+  node_gender <- dplyr::coalesce(gender_main, gender_text)
+  node_race   <- dplyr::coalesce(race_main,   race_text)
+  node_language <- lang_main
+  node_kin      <- recode_yn_na(kin_raw)
+  
+  node_closeness_comfort <- recode_yn_na(c1_raw)
+  node_closeness_name    <- recode_yn_na(c2_raw)
+  node_closeness_play    <- recode_yn_na(c3_raw)
+  node_closeness_pickup  <- recode_yn_na(c4_raw)
+  node_closeness_score   <- rowSums(cbind(
+    ifelse(is.na(node_closeness_comfort),0,node_closeness_comfort),
+    ifelse(is.na(node_closeness_name),0,node_closeness_name),
+    ifelse(is.na(node_closeness_play),0,node_closeness_play),
+    ifelse(is.na(node_closeness_pickup),0,node_closeness_pickup)
+  ))
+  
+  # FIXED
+  node_context       <- clean_context_vec(context_raw)
+  node_context_count <- count_contexts_vec(node_context)
+  mapping_code <- build_node_code(paste0("Act", act_id, "Adult"), i, raw_name)
+  
+  tibble::tibble(
+    ChildID = eg$ChildID,
+    ego_age_in_months = eg$ego_age_in_months,
+    ego_gender = eg$ego_gender,
+    ego_race   = eg$ego_race,
+    ego_language   = eg$ego_language,
+    ego_accent_categories = na_blank(pull_safe(ego_level_network_summary, "child_accent_categorized")),
+    ego_accent_specific   = na_blank(pull_safe(ego_level_network_summary, "child_accent_specific")),
+    
+    node_type  = paste0("Act", act_id, "Adult"),
+    node_index = i,
+    node_name  = raw_name,
+    node_relationship      = raw_rel,
+    node_liveathome_or_not = node_liveathome_or_not,
+    node_activity_specific  = act_label,
+    
+    node_daily_hour_weekday = NA_real_,
+    node_daily_hour_weekend = NA_real_,
+    node_weekly_hour        = node_weekly_hour,
+    node_weekly_hour_summarized = node_weekly_hour_summarized,
+    node_weekly_hour_percent    = node_weekly_hour_percent,
+    
+    node_age_in_months   = NA_real_,
+    node_age_categorized = age_cat_raw,
+    
+    node_gender = node_gender,
+    node_race   = node_race,
+    node_language        = node_language,
+    node_have_accent     = {
+      v <- recode_yn_na(acc_yn_raw)
+      ifelse(is.na(v), NA_character_, ifelse(v == 1, "Yes", "No"))
+    },
+    node_accent_categorized = accent_categorize_from(acc_main),
+    node_accent_specific    = accent_specific_from(acc_main, acc_t3, acc_t4, acc_t5, acc_t6),
+    node_mode_of_contact = contact_raw,
+    node_context         = node_context,
+    node_context_count   = node_context_count,
+    
+    node_kin = node_kin,
+    
+    node_closeness_comfort = node_closeness_comfort,
+    node_closeness_name    = node_closeness_name,
+    node_closeness_play    = node_closeness_play,
+    node_closeness_pickup  = node_closeness_pickup,
+    node_closeness_score   = node_closeness_score,
+    
+    node_clarify = clarify_raw,
+    node_mapping = mapping_raw,
+    node_mapping_code = mapping_code
+  ) %>% dplyr::filter(!(is.na(node_name) & is.na(node_relationship)))
+}
+```
+
+### ---- Activity – Kid nodes ----
+```{r activity kid}
+process_activity_kid <- function(df, ego_level_network_summary, act_id, i) {
+  km <- function(suf) paste0(i, "_act", act_id, "_kid_", suf)
+  
+  name_col <- km("basic_1_1")
+  week_col <- km("hour"); kin_col <- km("kin")
+  age_cat_col <- km("age")
+  gender_col <- km("gender"); gender_txt_col <- km("gender_2_TEXT")
+  race_col <- km("race");     race_txt_col  <- km("race_6_TEXT")
+  lang_col <- km("lang")
+  acc_col  <- km("accent");   acc3 <- km("accent_3_TEXT"); acc4 <- km("accent_4_TEXT"); acc5 <- km("accent_5_TEXT"); acc6 <- km("accent_6_TEXT"); acc_yn_col <- km("accent_yn")
+  contact_col <- km("contact"); context_col <- km("context")
+  c1_col <- km("closeness_comfort"); c2_col <- km("closeness_name")
+  c3_col <- km("closeness_play");    c4_col <- km("closeness_pickup")
+  clarify_col <- km("clarify_1"); mapping_col <- km("mapping_306")
+  act_label_col <- paste0("Activity_loading_", act_id)
+  
+  raw_name <- na_blank(pull_safe(df, name_col))
+  week_total <- pull_safe(df, week_col, type="double")
+  kin_raw <- pull_safe(df, kin_col)
+  age_cat_raw <- na_blank(pull_safe(df, age_cat_col))
+  gender_main <- na_blank(pull_safe(df, gender_col)); gender_text <- na_blank(pull_safe(df, gender_txt_col))
+  race_main <- na_blank(pull_safe(df, race_col));     race_text  <- na_blank(pull_safe(df, race_txt_col))
+  lang_main <- na_blank(pull_safe(df, lang_col))
+  contact_raw <- na_blank(pull_safe(df, contact_col)); context_raw <- na_blank(pull_safe(df, context_col))
+  acc_main    <- na_blank(pull_safe(df, acc_col))
+  acc_t3      <- na_blank(pull_safe(df, acc3)); acc_t4 <- na_blank(pull_safe(df, acc4)); acc_t5 <- na_blank(pull_safe(df, acc5)); acc_t6 <- na_blank(pull_safe(df, acc6))
+  acc_yn_raw  <- pull_safe(df, acc_yn_col)
+  c1_raw <- pull_safe(df, c1_col); c2_raw <- pull_safe(df, c2_col)
+  c3_raw <- pull_safe(df, c3_col); c4_raw <- pull_safe(df, c4_col)
+  clarify_raw <- suppressWarnings(as.integer(pull_safe(df, clarify_col)))
+  clarify_raw <- ifelse(is.na(clarify_raw), NA_integer_, pmax(clarify_raw - 1L, 0L))
+  mapping_raw <- na_blank(pull_safe(df, mapping_col))
+  act_label <- na_blank(pull_safe(df, act_label_col))
+  
+  eg <- ego_fields(ego_level_network_summary)
+  
+  node_liveathome_or_not <- rep("no", length(raw_name))
+  node_weekly_hour <- week_total
+  node_weekly_hour_summarized <- week_total
+  node_weekly_hour_summarized[is.nan(node_weekly_hour_summarized)] <- NA_real_
+  node_weekly_hour_percent <- percent_of_week(node_weekly_hour_summarized)
+  
+  node_gender <- dplyr::coalesce(gender_main, gender_text)
+  node_race   <- dplyr::coalesce(race_main,   race_text)
+  node_language <- lang_main
+  node_kin      <- recode_yn_na(kin_raw)
+  
+  node_closeness_comfort <- recode_yn_na(c1_raw)
+  node_closeness_name    <- recode_yn_na(c2_raw)
+  node_closeness_play    <- recode_yn_na(c3_raw)
+  node_closeness_pickup  <- recode_yn_na(c4_raw)
+  node_closeness_score   <- rowSums(cbind(
+    ifelse(is.na(node_closeness_comfort),0,node_closeness_comfort),
+    ifelse(is.na(node_closeness_name),0,node_closeness_name),
+    ifelse(is.na(node_closeness_play),0,node_closeness_play),
+    ifelse(is.na(node_closeness_pickup),0,node_closeness_pickup)
+  ))
+  
+  # FIXED
+  node_context       <- clean_context_vec(context_raw)
+  node_context_count <- count_contexts_vec(node_context)
+  mapping_code <- build_node_code(paste0("Act", act_id, "Kid"), i, raw_name)
+  
+  tibble::tibble(
+    ChildID = eg$ChildID,
+    ego_age_in_months = eg$ego_age_in_months,
+    ego_gender = eg$ego_gender,
+    ego_race   = eg$ego_race,
+    ego_language   = eg$ego_language,
+    ego_accent_categories = na_blank(pull_safe(ego_level_network_summary, "child_accent_categorized")),
+    ego_accent_specific   = na_blank(pull_safe(ego_level_network_summary, "child_accent_specific")),
+    
+    node_type  = paste0("Act", act_id, "Kid"),
+    node_index = i,
+    node_name  = raw_name,
+    node_relationship      = NA_character_,
+    node_liveathome_or_not = node_liveathome_or_not,
+    node_activity_specific  = act_label,
+    
+    node_daily_hour_weekday = NA_real_,
+    node_daily_hour_weekend = NA_real_,
+    node_weekly_hour        = node_weekly_hour,
+    node_weekly_hour_summarized = node_weekly_hour_summarized,
+    node_weekly_hour_percent    = node_weekly_hour_percent,
+    
+    node_age_in_months   = NA_real_,
+    node_age_categorized = age_cat_raw,
+    
+    node_gender = node_gender,
+    node_race   = node_race,
+    node_language        = node_language,
+    node_have_accent     = {
+      v <- recode_yn_na(acc_yn_raw)
+      ifelse(is.na(v), NA_character_, ifelse(v == 1, "Yes", "No"))
+    },
+    node_accent_categorized = accent_categorize_from(acc_main),
+    node_accent_specific    = accent_specific_from(acc_main, acc_t3, acc_t4, acc_t5, acc_t6),
+    node_mode_of_contact = contact_raw,
+    node_context         = node_context,
+    node_context_count   = node_context_count,
+    
+    node_kin = node_kin,
+    
+    node_closeness_comfort = node_closeness_comfort,
+    node_closeness_name    = node_closeness_name,
+    node_closeness_play    = node_closeness_play,
+    node_closeness_pickup  = node_closeness_pickup,
+    node_closeness_score   = node_closeness_score,
+    
+    node_clarify = clarify_raw,
+    node_mapping = mapping_raw,
+    node_mapping_code = mapping_code
+  ) %>% dplyr::filter(!is.na(node_name))
+}
+```
+
+## Build node_level_long
+```{r combine into node_level_long}
+sibling_nums        <- 1:15
+liveathome_nums     <- 1:15
+teacher_nums        <- 1:15
+schoolkid_nums      <- 1:15
+caregiver_nums      <- 1:15
+extendedfamily_nums <- 1:20
+anyoneelse_nums     <- 1:15
+
+activities <- 1:7
+per_activity_max <- 15
+
+long_sibling        <- map_dfr(sibling_nums,        ~process_sibling(df, ego_level_network_summary, .x))
+long_liveathome     <- map_dfr(liveathome_nums,     ~process_liveathome(df, ego_level_network_summary, .x))
+long_teacher        <- map_dfr(teacher_nums,        ~process_teacher(df, ego_level_network_summary, .x))
+long_schoolkid      <- map_dfr(schoolkid_nums,      ~process_schoolkid(df, ego_level_network_summary, .x))
+long_caregiver      <- map_dfr(caregiver_nums,      ~process_caregiver(df, ego_level_network_summary, .x))
+long_extendedfamily <- map_dfr(extendedfamily_nums, ~process_extendedfamily(df, ego_level_network_summary, .x))
+long_anyoneelse     <- map_dfr(anyoneelse_nums,     ~process_anyoneelse(df, ego_level_network_summary, .x))
+
+long_activity_adults <- map_dfr(activities, function(act_id) {
+  map_dfr(1:per_activity_max, ~process_activity_adult(df, ego_level_network_summary, act_id, .x))
+})
+long_activity_kids <- map_dfr(activities, function(act_id) {
+  map_dfr(1:per_activity_max, ~process_activity_kid(df, ego_level_network_summary, act_id, .x))
+})
+
+node_level_long <- bind_rows(
+  long_sibling,
+  long_liveathome,
+  long_teacher,
+  long_schoolkid,
+  long_caregiver,
+  long_extendedfamily,
+  long_anyoneelse,
+  long_activity_adults,
+  long_activity_kids
+) %>%
+  distinct() %>%
+  arrange(ChildID, node_type, node_index)
+```
+
+# 3: Build activity_level_long
+```{r activity level}
+# --------------------------- 3) Build activity_level_long ---------------------------
+# deps assumed loaded: dplyr, tidyr, tibble, stringr, purrr
+# inputs assumed present: df, node_level_long
+
+# ----- helpers -----
+nonempty_chr <- function(x) {
+  # treat NA, "", "na", "n/a", "null" (any case, with spaces) as empty
+  z <- as.character(x)
+  z <- stringr::str_trim(z)
+  bad <- is.na(z) | z == "" | stringr::str_to_lower(z) %in% c("na","n/a","null")
+  !bad
+}
+
+# Accepts "Act1Kid", "Activity3Adult2", "act4", "act2kid1", etc.
+parse_node_type <- function(node_type_chr) {
+  if (is.null(node_type_chr)) {
+    return(tibble(.act_id = integer(), .role = character()))
+  }
+  raw  <- stringr::str_to_lower(as.character(node_type_chr))
+  norm <- gsub("[^a-z0-9]+", "", raw)
+  # capture: act|activity + [1-7] + optional role + optional digits
+  m <- stringr::str_match(norm, "^(?:act|activity)([1-7])(?:(kid|adult)\\d*)?$")
+  tibble(
+    .act_id = suppressWarnings(as.integer(m[, 2])),
+    .role   = dplyr::case_when(
+      !is.na(m[,3]) & m[,3] == "kid"   ~ "kid",
+      !is.na(m[,3]) & m[,3] == "adult" ~ "adult",
+      TRUE                             ~ "adult"   # default when unspecified
+    )
+  )
+}
+
+resolve_child_id <- function(d, prefer = c("ChildID"), fallback_prefix = "R") {
+  nm <- intersect(prefer, names(d))
+  if (length(nm) > 0) {
+    out <- as.character(d[[nm[1]]])
+  } else {
+    out <- sprintf("%s%05d", fallback_prefix, seq_len(nrow(d)))
+  }
+  out
+}
+
+# ----- choose join key -----
+candidate_keys <- c("ChildID")
+common_keys <- intersect(candidate_keys, intersect(names(df), names(node_level_long)))
+join_key <- if (length(common_keys) > 0) common_keys[1] else NA_character_
+
+# ----- identify columns -----
+act_vars     <- c("otherkids","otherkids_2_TEXT","child_age","gender","race","race_7_TEXT","contact","lang")
+make_cols    <- function(i, vars) paste0("act", i, "_", vars)
+all_act_cols <- intersect(unlist(lapply(1:7, make_cols, vars = act_vars)), names(df))
+loading_cols <- intersect(paste0("Activity_loading_", 1:7), names(df))
+
+if (length(all_act_cols) == 0) stop("No act[1-7]_* columns found in df.")
+if (length(loading_cols) == 0) stop("No Activity_loading_[1-7] columns found in df.")
+
+# ----- prepare df1; DO NOT overwrite an existing ChildID -----
+df1 <- df %>%
+  mutate(
+    .rowid    = dplyr::row_number(),
+    .join_key = if (!is.na(join_key) && (join_key %in% names(.))) as.character(.data[[join_key]]) else "1",
+    ChildID   = dplyr::coalesce(as.character(.data[["ChildID"]]), resolve_child_id(.))
+  )
+
+# blank activity answers when contexts_yn says No
+if ("contexts_yn" %in% names(df1)) {
+  wipe_mask <- stringr::str_to_lower(as.character(df1$contexts_yn)) %in% c("no","0","false")
+  if (any(wipe_mask)) {
+    df1[wipe_mask, all_act_cols] <- NA
+    df1[wipe_mask, loading_cols] <- NA
+  }
+}
+
+# ----- pivot activity fields (keep ChildID) -----
+activity_level_long_pre <- df1 %>%
+  dplyr::select(.rowid, .join_key, ChildID, dplyr::all_of(all_act_cols)) %>%
+  tidyr::pivot_longer(
+    cols = -c(.rowid, .join_key, ChildID),
+    names_to = c("activity_id", ".value"),
+    names_pattern = "^act([1-7])_(.*)$",
+    values_drop_na = FALSE
+  ) %>%
+  mutate(activity_id = as.integer(activity_id))
+
+# ----- pivot Activity_loading_* and LEFT JOIN (do not drop rows) -----
+loading_long <- df1 %>%
+  dplyr::select(.rowid, .join_key, dplyr::all_of(loading_cols)) %>%
+  tidyr::pivot_longer(
+    cols = -c(.rowid, .join_key),
+    names_to   = "activity_id",
+    names_pattern = "^Activity_loading_([1-7])$",
+    values_to  = "activity_name",
+    values_drop_na = FALSE
+  ) %>%
+  mutate(activity_id = as.integer(activity_id))
+
+merged <- activity_level_long_pre %>%
+  dplyr::left_join(loading_long, by = c(".rowid", ".join_key", "activity_id"))
+
+# ----- build per-respondent activity counts from node_level_long -----
+if (!is.na(join_key) && (join_key %in% names(node_level_long))) {
+  join_vec <- as.character(node_level_long[[join_key]])
+} else if ("ChildID" %in% names(node_level_long) && "ChildID" %in% names(df1)) {
+  join_vec <- as.character(node_level_long[["ChildID"]])
+} else {
+  join_vec <- rep("1", nrow(node_level_long))
+  warning("No common join key found between df and node_level_long; activity counts are global.")
+}
+
+parsed <- parse_node_type(node_level_long$node_type)
+
+counts_tbl <- tibble(
+  .join_key = join_vec,
+  .act_id   = parsed$.act_id,
+  .role     = parsed$.role
+) %>%
+  dplyr::filter(!is.na(.act_id), .act_id >= 1L, .act_id <= 7L) %>%
+  dplyr::mutate(
+    activity_adults = as.integer(.role == "adult"),
+    activity_kids   = as.integer(.role == "kid")
+  ) %>%
+  dplyr::group_by(.join_key, .act_id) %>%
+  dplyr::summarise(
+    activity_adults = sum(activity_adults, na.rm = TRUE),
+    activity_kids   = sum(activity_kids,   na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# ----- final table -----
+otherkids_text  <- if ("otherkids_2_TEXT" %in% names(merged)) as.character(merged$otherkids_2_TEXT) else rep(NA_character_, nrow(merged))
+otherkids_n_val <- suppressWarnings(as.integer(stringr::str_extract(otherkids_text, "\\d+")))
+
+activity_level_long <- merged %>%
+  dplyr::left_join(counts_tbl, by = c(".join_key" = ".join_key", "activity_id" = ".act_id")) %>%
+  dplyr::mutate(
+    activity_label        = paste0("Activity ", activity_id),
+    activity_otherkids_yn = if ("otherkids" %in% names(.)) as.character(otherkids) else NA_character_,
+    activity_otherkids_n  = otherkids_n_val,
+    activity_child_age    = child_age,
+    activity_gender       = gender,
+    activity_race         = if ("race" %in% names(.)) as.character(race) else NA_character_,
+    activity_race_other   = if ("race_7_TEXT" %in% names(.)) as.character(race_7_TEXT) else NA_character_,
+    activity_contact      = contact,
+    activity_lang         = lang,
+    activity_adults       = dplyr::coalesce(activity_adults, 0L),
+    activity_kids         = dplyr::coalesce(activity_kids,   0L)
+  ) %>%
+  # keep only rows with some real content
+  dplyr::filter(
+    nonempty_chr(activity_name) |
+      nonempty_chr(activity_otherkids_yn) | !is.na(activity_otherkids_n) |
+      nonempty_chr(activity_child_age) | nonempty_chr(activity_gender) | nonempty_chr(activity_race) |
+      nonempty_chr(activity_contact) | nonempty_chr(activity_lang) |
+      activity_adults > 0L | activity_kids > 0L
+  ) %>%
+  dplyr::transmute(
+    ChildID,
+    activity_id,
+    activity_label,
+    activity_name,
+    activity_otherkids_yn,
+    activity_otherkids_n,
+    activity_child_age,
+    activity_gender,
+    activity_race,        # main selection
+    activity_race_other,  # free text
+    activity_contact,
+    activity_lang,
+    activity_adults,
+    activity_kids
+  )
+
+# alias for clarity
+activity_level_long <- activity_level_long
+
+```
+
+
+# 4: Network Summaries
+
+```{r summary helpers}
+
+# Helpers (language parsing, race normalization, entropy)
+# Keep helpers in one place; avoid hidden globals later in the script.
+
+# Used to strip out the "not a language" meta choice from Qualtrics.
+LANG_META_EXACT <- "preverbal/nonverbal"
+
+# Conservative splitter for languages. We:
+#  - split on comma/semicolon
+#  - trim whitespace
+#  - drop the meta option (case-insensitive)
+#  - return unique tokens
+parse_langs_clean <- function(s) {
+  if (is.na(s) || !nzchar(trimws(s))) return(character(0))
+  toks <- unlist(strsplit(s, "[,;]"))
+  toks <- stringr::str_trim(toks)
+  toks <- toks[nzchar(toks)]
+  toks <- toks[!tolower(toks) %in% tolower(LANG_META_EXACT)]
+  unique(toks)
+}
+
+# Exact tokenization for EI work:
+#  - remove leading labels like "Multilingual:", "Bilingual:", "Exposure:"
+#  - split on comma/semicolon
+#  - same meta drop as above
+.parse_langs_exact <- function(s) {
+  if (is.na(s) || !nzchar(trimws(s))) return(character(0))
+  s <- gsub("^\\s*(multilingual|bilingual|exposure)\\s*:\\s*", "", s,
+            ignore.case = TRUE, perl = TRUE)
+  toks <- unlist(strsplit(s, "[,;]"))
+  toks <- stringr::str_trim(toks)
+  toks <- toks[nzchar(toks)]
+  toks <- toks[!tolower(toks) %in% tolower(LANG_META_EXACT)]
+  unique(toks)
+}
+
+# ---- Accent helpers (shared by ego and node) ----
+accent_categorize_from <- function(main_choice) {
+  s <- tolower(as.character(main_choice))
+  if (is.na(s) || !nzchar(trimws(s))) return(NA_character_)
+  labs <- character(0)
+  if (grepl("european", s, ignore.case = TRUE)) labs <- c(labs, "European")
+  if (grepl("asian",    s, ignore.case = TRUE)) labs <- c(labs, "Asian")
+  if (grepl("regional", s, ignore.case = TRUE)) labs <- c(labs, "Regional U.S.")
+  if (!length(labs)) return(NA_character_)
+  paste(labs, collapse = ", ")
+}
+
+accent_specific_from <- function(main_choice, t3, t4, t5, t6) {
+  s <- tolower(as.character(main_choice))
+  specs <- character(0)
+  if (!is.na(s) && grepl("british",  s, ignore.case = TRUE)) specs <- c(specs, "British")
+  if (!is.na(s) && grepl("hispanic", s, ignore.case = TRUE)) specs <- c(specs, "Hispanic")
+  add_spec <- function(x) { x <- trimws(as.character(x)); if (!is.na(x) && nzchar(x)) specs <<- c(specs, x) }
+  add_spec(t3); add_spec(t4); add_spec(t5); add_spec(t6)
+  specs <- unique(specs)
+  if (!length(specs)) return(NA_character_)
+  paste(specs, collapse = "; ")
+}
+
+# Race normalization
+# You will not get perfect harmonization across free text, but a consistent,
+# documented mapping is better than ad-hoc string compares downstream.
+.normalize_race_token <- function(tok) {
+  if (is.na(tok)) return(NA_character_)
+  t <- tolower(trimws(as.character(tok)))
+  t <- gsub("[^a-z\\s]", " ", t)  # remove punctuation
+  t <- gsub("\\s+", " ", t)       # squeeze whitespace
+  if (t == "" || t %in% c("na","n a","prefer not to answer")) return(NA_character_)
+  dplyr::case_when(
+    grepl("\\bwhite|caucasian\\b",                           t) ~ "White",
+    grepl("\\bblack|african\\s*american",                    t) ~ "Black or African American",
+    grepl("\\basian\\b|chinese|japanese|korean|vietnam|filipin|\\bindian\\b", t) ~ "Asian",
+    grepl("american\\s*indian|alaska\\s*native|native\\s*american",           t) ~ "American Indian or Alaska Native",
+    grepl("pacific|hawaii|samoa|guam|marshall",              t) ~ "Native Hawaiian or Other Pacific Islander",
+    grepl("hispanic|latino|latina|latinx|mexic|puerto|cuban|chican", t) ~ "Hispanic/Latino",
+    grepl("middle\\s*eastern|north\\s*africa|mena|arab",     t) ~ "Middle Eastern/North African",
+    grepl("biracial|multi\\s*rac",                           t) ~ "Multiracial",
+    TRUE ~ "Other"  # explicit catch-all; avoids silently dropping anything else
+  )
+}
+
+# Tokenize + normalize a single value that may contain multiple races.
+# Splits on commas/semicolons/slashes/& and the word "and".
+.tokenize_race_norm <- function(x) {
+  if (is.null(x) || (length(x) == 1 && is.na(x))) return(character(0))
+  toks <- unlist(strsplit(as.character(x), "[,;/&]|\\band\\b", perl = TRUE))
+  toks <- unique(trimws(toks[nzchar(trimws(toks))]))
+  out  <- vapply(toks, .normalize_race_token, character(1))
+  unique(na.omit(out))
+}
+
+# Entropy in bits. We:
+#  - drop NA / non-finite
+#  - ignore zero-prob bins (log(0) undefined)
+entropy_bits <- function(p) {
+  p <- as.numeric(p)
+  p <- p[is.finite(p) & !is.na(p) & p > 0]
+  if (!length(p)) return(NA_real_)
+  -sum(p * log2(p))
+}
+```
+
+
+## Network size
+```{r network wize}
+# --- Network size -------------------------------------------------------------
+# Count unique alters per child. We use (node_type, node_index) uniqueness to
+# guard against duplicated rows of the same alter.
+node_counts <- node_level_long %>%
+  filter(!(is.na(node_name) & is.na(node_relationship))) %>%   # keep rows that at least name or define relationship
+  distinct(ChildID, node_type, node_index) %>%                 # unique alter within child
+  count(ChildID, name = "network_size")
+
+ego_level_network_summary <- ego_level_network_summary %>%
+  left_join(node_counts, by = "ChildID") %>%
+  # If a child lists no alters, network_size is 0 (not NA). Avoids divide-by-zero later.
+  mutate(network_size = ifelse(is.na(network_size), 0L, network_size))
+
+```
+
+## Component
+```{r component}
+# --- Component groups  ---------------------------------------
+# Normalize node_type → group labels for coarse-grained component counts.
+# Groups:
+#   HomeCare   = Sibling | Liveathome | Extended family | Caregiver
+#   Daycare    = Teacher | Schoolkid
+#   AnyoneElse = Anyoneelse
+#   Act1..Act7 = Act1 to Act7 (Kid, Adult, or empty all collapse to ActN)
+.map_component_group <- function(node_type_raw) {
+  if (is.null(node_type_raw) || is.na(node_type_raw) || trimws(node_type_raw) == "") return(NA_character_)
+  nt <- tolower(as.character(node_type_raw))
+  nt <- gsub("[^a-z0-9]", "", nt)  # strip spaces, underscores, hyphens, etc.
+  
+  # Activities first; accept "act" or "activity"; optional kid or adult suffix
+  if (grepl("^(act|activity)[1-7](kid|adult)?$", nt, perl = TRUE)) {
+    num <- sub("^(?:act|activity)([1-7]).*$", "\\1", nt, perl = TRUE)
+    return(paste0("Act", num))
+  }
+  
+  if (nt %in% c("sibling", "liveathome", "extendedfamily", "caregiver")) return("HomeCare")
+  if (nt %in% c("teacher", "schoolkid")) return("Daycare")
+  if (nt %in% c("anyoneelse")) return("AnyoneElse")
+  
+  # Unrecognized node_type → exclude from component counting
+  NA_character_
+}
+
+# Safety checks
+stopifnot(all(c("ChildID", "node_type") %in% names(node_level_long)))
+
+# Attach the normalized label to each node row
+node_level_long <- node_level_long %>%
+  dplyr::mutate(node_component_group = vapply(node_type, .map_component_group, character(1)))
+
+# Optional: list unknown node types so you can update the mapper
+unknown_types <- node_level_long %>%
+  dplyr::filter(is.na(node_component_group) & !is.na(node_type) & trimws(node_type) != "") %>%
+  dplyr::distinct(node_type)
+if (nrow(unknown_types) > 0) {
+  message("Unmapped node_type values (excluded from component counting):")
+  print(unknown_types)
+}
+
+# Fixed ordering for reporting or deterministic summaries
+component_levels <- c("HomeCare","Daycare","AnyoneElse","Act1","Act2","Act3","Act4","Act5","Act6","Act7")
+
+# Count distinct component labels per child.
+# Important: NAs are filtered out, so they will not inflate counts to 1.
+counts_all <- node_level_long %>%
+  dplyr::filter(!is.na(node_component_group)) %>%
+  dplyr::distinct(ChildID, node_component_group) %>%
+  dplyr::mutate(.order = factor(node_component_group, levels = component_levels, ordered = TRUE)) %>%
+  dplyr::arrange(ChildID, .order) %>%
+  dplyr::group_by(ChildID) %>%
+  dplyr::summarise(component_count = dplyr::n(), .groups = "drop")
+
+# Join counts and compute ratio on the ego-level summary
+stopifnot("network_size" %in% names(ego_level_network_summary))
+
+ego_level_network_summary <- ego_level_network_summary %>%
+  dplyr::select(-dplyr::any_of("component_count")) %>%
+  dplyr::left_join(counts_all, by = "ChildID") %>%
+  dplyr::mutate(
+    network_size            = suppressWarnings(as.numeric(network_size)),
+    network_component_count = suppressWarnings(as.numeric(component_count)),
+    network_component_ratio = ifelse(
+      !is.na(network_size) & network_size > 1 & !is.na(network_component_count),
+      round((network_component_count - 1) / (network_size - 1), 3),
+      NA_real_
+    )
+  ) %>%
+  dplyr::select(-component_count)
+
+```
+
+## Demographics completion (75% rule)
+```{r flag completion}
+demo_flags <- node_level_long %>%
+  dplyr::mutate(
+    age_ok  = !is.na(node_age_categorized) & nzchar(trimws(as.character(node_age_categorized))),
+    kin_ok  = !is.na(node_kin),
+    race_ok = !is.na(node_race) & nzchar(trimws(as.character(node_race))),
+    # parse_langs_clean returns character(0) when empty; lengths(..) > 0 means at least one real language token
+    lang_ok = lengths(lapply(node_language, parse_langs_clean)) > 0,
+    # Both mapping fields must be non-missing and non-empty for density to be meaningful
+    map_ok  = !is.na(node_mapping_code) & node_mapping_code != "" &
+      !is.na(node_mapping)      & node_mapping      != "",
+    has_demo = age_ok | kin_ok | race_ok | lang_ok | map_ok
+  ) %>%
+  dplyr::group_by(ChildID) %>%
+  dplyr::summarise(
+    network_75cutoff_validity = dplyr::if_else(
+      sum(has_demo, na.rm = TRUE) / dplyr::n() >= 0.75,
+      "yes", "rejected"
+    ),
+    .groups = "drop"
+  )
+
+# Merge into ego_level_network_summary. If these columns already exist from prior runs, drop them first.
+ego_level_network_summary <- ego_level_network_summary %>%
+  dplyr::select(-dplyr::any_of(c("network_75cutoff_validity"))) %>%
+  dplyr::left_join(demo_flags, by = "ChildID")
+```
+## Proportions: adults & kin
+
+```{r proportion_adult_kin}
+adult_prop <- node_level_long %>%
+  filter(!is.na(node_age_categorized)) %>%
+  group_by(ChildID) %>%
+  summarise(
+    total_nodes = n(),
+    adult_count = sum(node_age_categorized == "18 years old or older", na.rm = TRUE),
+    prop_adult_relationship = round(adult_count / total_nodes, 2),
+    .groups = "drop"
+  ) %>%
+  mutate(network_prop_adult_relationship = prop_adult_relationship) %>%
+  select(ChildID, network_prop_adult_relationship)
+
+ego_level_network_summary <- ego_level_network_summary %>%
+  left_join(adult_prop, by = "ChildID")
+
+# Kin proportion: node_kin == 1; exclude missing to avoid diluting denominators.
+kin_prop <- node_level_long %>%
+  filter(!is.na(node_kin)) %>%
+  group_by(ChildID) %>%
+  summarise(
+    total_nodes = n(),
+    kin_count = sum(node_kin == 1, na.rm = TRUE),
+    prop_kin_relationship = round(kin_count / total_nodes, 2),
+    .groups = "drop"
+  ) %>%
+  mutate(network_prop_kin_relationship = prop_kin_relationship) %>%
+  select(ChildID, network_prop_kin_relationship)
+
+ego_level_network_summary <- ego_level_network_summary %>%
+  left_join(kin_prop, by = "ChildID")
+```
+## Racial Entropy
+```{r racial entropy}
+race_entropy <- node_level_long %>%
+  mutate(
+    race_cat = as.character(node_race) %>% str_trim(),
+    race_cat = na_if(race_cat, "")
+  ) %>%
+  filter(!is.na(race_cat)) %>%
+  count(ChildID, race_cat, name = "n") %>%
+  group_by(ChildID) %>%
+  mutate(p = n / sum(n)) %>%
+  arrange(ChildID, desc(p), race_cat) %>%
+  summarise(
+    network_racial_entropy = round(-sum(p * log2(p)), 3),
+    network_racial_p_labels = paste0("(", paste(race_cat, collapse = "; "), ")"),
+    network_racial_p_vector = paste0("X=(", paste(formatC(p, format = "f", digits = 4), collapse = "; "), ")"),
+    .groups = "drop"
+  ) %>%
+  select(ChildID, network_racial_entropy, network_racial_p_labels, network_racial_p_vector)
+
+ego_level_network_summary <- ego_level_network_summary %>%
+  left_join(race_entropy, by = "ChildID")
+```
+
+## Racial EI index
+```{r racial ei index}
+# EI = (different − same) / valid_alters
+# "same" means any overlap between alter race set and child race set.
+# All values calculated regardless of validity status.
+# =============================================================================
+
+# Build child race sets once; carry NA → length 0 vector to avoid false positives.
+child_race_sets <- ego_level_network_summary %>%
+  select(ChildID, child_race) %>%
+  mutate(child_race_set = map(child_race, .tokenize_race_norm)) %>%
+  select(-child_race)
+
+# Per-alter race sets, joined with child sets, then determine "same".
+ei_work <- node_level_long %>%
+  select(ChildID, node_race) %>%
+  mutate(node_race = as.character(node_race),
+         node_race = trimws(node_race)) %>%
+  filter(!is.na(node_race) & node_race != "") %>%
+  mutate(alter_race_set = map(node_race, .tokenize_race_norm)) %>%
+  left_join(child_race_sets, by = "ChildID") %>%
+  mutate(
+    same_flag = map2(alter_race_set, child_race_set, function(alt, kid) {
+      if (length(kid) == 0 || length(alt) == 0) return(NA)     # not valid for EI calc
+      length(intersect(alt, kid)) > 0                           # TRUE if any shared token
+    }) %>% unlist()
+  )
+
+racial_ei_by_child <- ei_work %>%
+  group_by(ChildID) %>%
+  summarise(
+    valid = sum(!is.na(same_flag)),
+    network_racial_ingroup = sum(same_flag, na.rm = TRUE),
+    network_racial_outgroup = sum(!same_flag, na.rm = TRUE),
+    network_racial_ei_index = if_else(valid > 0, round((network_racial_outgroup - network_racial_ingroup) / valid, 3), NA_real_),
+    .groups = "drop"
+  ) %>%
+  select(ChildID, network_racial_ei_index, network_racial_ingroup, network_racial_outgroup)
+
+ego_level_network_summary <- ego_level_network_summary %>%
+  left_join(racial_ei_by_child, by = "ChildID")
+```
+
+## Linguistic entropy
+```{r linguistic entropy}
+# We weight each alter's multiple languages equally (1/k across their tokens),
+# then aggregate per child into proportions, then entropy.
+# All values calculated regardless of validity status.
+# =============================================================================
+
+lang_weights <- node_level_long %>%
+  distinct(ChildID, node_mapping_code, node_language) %>%       # unique alter within child
+  mutate(langs = lapply(node_language, parse_langs_clean),
+         k     = lengths(langs)) %>%
+  filter(k > 0) %>%                                             # drop alters with no real language tokens
+  unnest_longer(langs, values_to = "lang") %>%
+  mutate(weight = 1 / k) %>%                                    # equal-split weight within alter
+  select(ChildID, node_mapping_code, lang, weight)
+
+# Denominator: how many alters with at least one language token per child
+denom <- lang_weights %>%
+  group_by(ChildID) %>%
+  summarise(n_lang_known = n_distinct(node_mapping_code), .groups = "drop")
+
+# Child × language proportions from weights / denom
+lang_prop <- lang_weights %>%
+  group_by(ChildID, lang) %>%
+  summarise(weight_sum = sum(weight), .groups = "drop") %>%
+  left_join(denom, by = "ChildID") %>%
+  mutate(prop = ifelse(n_lang_known > 0, weight_sum / n_lang_known, NA_real_)) %>%
+  select(ChildID, lang, prop)
+
+# Entropy plus some human-readable vectors for quick inspection
+language_entropy_by_child <- lang_prop %>%
+  group_by(ChildID) %>%
+  arrange(ChildID, desc(prop), lang) %>%
+  summarise(
+    network_language_entropy  = round(entropy_bits(prop), 3),
+    network_language_p_labels = paste0("(", paste(lang, collapse = "; "), ")"),
+    network_language_p_vector = paste0("X=(", paste(formatC(prop, format = "f", digits = 4), collapse = "; "), ")"),
+    .groups = "drop"
+  ) %>%
+  select(ChildID, network_language_entropy, network_language_p_labels, network_language_p_vector)
+
+ego_level_network_summary <- ego_level_network_summary %>%
+  left_join(language_entropy_by_child, by = "ChildID")
+```
+
+## Linguistic EI Index
+```{r linguistic EI Index}
+# EI = (different − same) / valid_alters
+
+child_lang_sets <- ego_level_network_summary %>%
+  select(ChildID, child_lang) %>%
+  mutate(child_lang_set = map(child_lang, .parse_langs_exact)) %>%
+  select(-child_lang)
+
+lang_ei_work <- node_level_long %>%
+  select(ChildID, node_language) %>%
+  mutate(
+    alter_lang_set = map(node_language, .parse_langs_exact),
+    has_lang = lengths(alter_lang_set) > 0
+  ) %>%
+  filter(has_lang) %>%
+  left_join(child_lang_sets, by = "ChildID") %>%
+  mutate(
+    same_flag = map2(alter_lang_set, child_lang_set, function(alt, kid) {
+      if (length(kid) == 0) return(NA)              # child has no languages → not valid for EI calc
+      length(setdiff(alt, kid)) == 0                # TRUE if alter is subset of child
+    }) %>% unlist()
+  )
+
+linguistic_ei_by_child <- lang_ei_work %>%
+  group_by(ChildID) %>%
+  summarise(
+    network_size_valid_lang = sum(!is.na(same_flag)),           # denominator actually used
+    network_lang_ingroup  = sum(same_flag, na.rm = TRUE),
+    network_lang_outgroup  = sum(!same_flag, na.rm = TRUE),
+    network_linguistic_ei_index = if_else(
+      network_size_valid_lang > 0,
+      round((network_lang_outgroup - network_lang_ingroup) / network_size_valid_lang, 3),
+      NA_real_
+    ),
+    .groups = "drop"
+  ) %>%
+  select(ChildID, network_linguistic_ei_index, network_size_valid_lang, network_lang_ingroup, network_lang_outgroup)
+
+ego_level_network_summary <- ego_level_network_summary %>%
+  left_join(linguistic_ei_by_child, by = "ChildID")
+```
+
+## Network density
+```{r network density}
+# We build undirected alter–alter edges from mapping and divide by choose(N,2).
+# All values calculated regardless of validity status. Note: choice of using mapping codes ensures identity.
+
+compute_density_per_child <- function(df_child) {
+  # Universe of alters = distinct mapping codes that are present and non-empty
+  alters <- df_child %>%
+    filter(!is.na(node_mapping_code), node_mapping_code != "") %>%
+    pull(node_mapping_code) %>% unique()
+  N <- length(alters)
+  if (N < 2) {
+    # Fewer than 2 nodes → density undefined; we return NA for density, 0 edges.
+    return(tibble(network_density = NA_real_, network_edges_number = 0L))
+  }
+  
+  # Expand mapping strings into pairwise edges and deduplicate undirected edges
+  edges_df <- df_child %>%
+    transmute(src = node_mapping_code,
+              mapping = ifelse(is.na(node_mapping), "", node_mapping)) %>%
+    filter(!is.na(src), src != "") %>%
+    mutate(alts = strsplit(mapping, ",")) %>%
+    unnest(alts) %>%
+    mutate(alts = str_trim(alts)) %>%
+    # Only keep edges where both endpoints are in the current child's alter set
+    filter(alts != "", src %in% alters, alts %in% alters, alts != src) %>%
+    transmute(from = pmin(src, alts), to = pmax(src, alts)) %>%
+    distinct()
+  
+  network_edges_number <- nrow(edges_df)
+  dens <- network_edges_number / choose(N, 2)
+  tibble(network_density = round(dens, 3), network_edges_number = network_edges_number)
+}
+
+density_by_child <- node_level_long %>%
+  group_split(ChildID, .keep = TRUE) %>%
+  map_dfr(function(df_c) {
+    out <- compute_density_per_child(df_c)
+    tibble(ChildID = df_c$ChildID[1]) %>% bind_cols(out)
+  }) %>%
+  select(ChildID, network_density, network_edges_number)
+
+ego_level_network_summary <- ego_level_network_summary %>%
+  left_join(density_by_child, by = "ChildID")
+```
+
+
+# 5: Column reorganization
+```{r cleaning_column_order}
+# Intention: make exports readable and predictable for analysts; everything else
+# goes to the end to avoid accidental data loss.
+cols_ids_meta <- c(
+  "ChildID", "survey_respondent", "child_name", "survey_enddate", "survey_completion"
+)
+
+cols_child_demo <- c(
+  "child_birthdate", "child_age_in_months", "child_gender",
+  "child_race", "child_race_other", "child_race_detail",
+  "child_zipcode"
+)
+
+cols_childcare <- c(
+  "childcare_yn", "childcare_type", "childcare_start_age", "childcare_size",
+  "childcare_child_age", "childcare_gender", "childcare_race", "childcare_race_other", "childcare_lang"
+)
+
+cols_child_lang <- c(
+  "child_lang", "child_lang_categorized"
+)
+
+cols_net_composition <- c(
+  "network_size", "network_density", "network_edges_number", "network_component_count", "network_component_ratio",
+  "network_75cutoff_validity"
+)
+
+cols_diversity_ei <- c(
+  "network_prop_adult_relationship", "network_prop_kin_relationship",
+  "network_racial_entropy", "network_racial_p_labels", "network_racial_p_vector",
+  "network_racial_ei_index", "network_racial_ingroup", "network_racial_outgroup",
+  "network_language_entropy", "network_language_p_labels", "network_language_p_vector",
+  "network_linguistic_ei_index", "network_size_valid_lang", "network_lang_ingroup", "network_lang_outgroup"
+)
+
+desired_order <- c(
+  cols_ids_meta,
+  cols_child_demo,
+  cols_childcare,
+  cols_child_lang,
+  cols_net_composition,
+  cols_diversity_ei
+)
+
+# Create typed placeholders for any declared-but-missing columns.
+missing_cols <- setdiff(desired_order, names(ego_level_network_summary))
+if (length(missing_cols)) {
+  numeric_like <- c(
+    "child_age_in_months",
+    "childcare_start_age","childcare_size","childcare_child_age",
+    "network_size","network_component_count","network_component_ratio",
+    "network_prop_adult_relationship","network_prop_kin_relationship",
+    "network_racial_entropy","network_racial_ei_index","network_racial_ingroup","network_racial_outgroup",
+    "network_language_entropy","network_linguistic_ei_index","network_size_valid_lang",
+    "network_lang_ingroup","network_lang_outgroup","network_density","network_edges_number"
+  )
+  num_missing <- intersect(missing_cols, numeric_like)
+  chr_missing <- setdiff(missing_cols, num_missing)
+  
+  if (length(num_missing)) {
+    ego_level_network_summary[num_missing] <- lapply(num_missing, function(.) NA_real_)
+  }
+  if (length(chr_missing)) {
+    ego_level_network_summary[chr_missing] <- lapply(chr_missing, function(.) NA_character_)
+  }
+}
+
+# Preserve any unexpected columns by appending them after the declared schema.
+leftovers <- setdiff(names(ego_level_network_summary), desired_order)
+ordered_cols <- c(desired_order, leftovers)
+
+ego_level_network_summary <- ego_level_network_summary %>%
+  dplyr::select(all_of(ordered_cols))
+
+```
+# 6: Data Export into csv
+
+```{r}
+# csv format is needed for plotting tool; disabled for preview runs
+
+  write.csv(ego_level_network_summary, "path")
+  write.csv(activity_level_long, "path")
+  write.csv(node_level_long, "path")
+
+```
