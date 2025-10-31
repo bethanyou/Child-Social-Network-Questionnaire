@@ -337,8 +337,8 @@
         }
   
         .header {
-            background: linear-gradient(135deg, #800000 0%, #5a0000 100%);
-            color: white;
+            background: #ffffff;
+            color: inherit;
             padding: 1.5rem 1rem;
             text-align: center;
         }
@@ -347,7 +347,8 @@
             font-size: 1.3rem;
             font-weight: 700;
             margin-bottom: 0.5rem;
-            text-shadow: 0 2px 4px rgba(0,0,0,0.3);
+            color: #800000;
+            text-shadow: none;
         }
   
         .header .subtitle {
@@ -2194,7 +2195,7 @@
   
         .fixed-details-panel .info-value {
             font-size: 0.95rem;
-            color: #2c3e50;
+            color: #2c3e50;https://github.com/bethanyou/Child-Social-Network-Questionnaire/blob/135c61cc0d8aceadfe725e3a689be35eae3b49d9/logo3-removebg-preview.png
             line-height: 1.3;
             word-break: break-word;
             hyphens: auto;
@@ -2239,13 +2240,29 @@
                 </div>
             </div>
 
+            <!-- Sample data box above download section -->
+            <div class="download-section" style="margin-top: 0.5rem;">
+                <h3>Step 0: Try Out Testing Data</h3>
+                <div style="background:#f8fafc;border-left:4px solid #dc2626;border-radius:12px;padding:1rem 1.25rem;margin:0.5rem 0 1rem 0;">
+                    <div style="display:flex;align-items:center;gap:.75rem;">
+                        <div style="width:28px;height:28px;border-radius:9999px;background:#991b1b;color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;">0</div>
+                        <div>
+                            <h4 style="margin:0 0 .25rem 0;">Download Sample Data</h4>
+                            <p style="margin:0;color:#374151;">Want to test the pipeline before collecting your own data? Download our sample dataset to see how the processing works.</p>
+                        </div>
+                    </div>
+                    <div style="margin-top:0.75rem;">
+                        <a class="download-button" href="https://drive.google.com/drive/folders/1oKIHeWNTaYJUSPEkNnbPcC9ylWu09axs?usp=drive_link" target="_blank" rel="noopener" style="text-decoration:none;display:inline-block;text-align:center;">Download Sample Data</a>
+                    </div>
+                </div>
+            </div>
+
             <!-- Download section placed before admin access -->
             <div class="download-section">
                 <h3>Download This Dashboard</h3>
-                <p>Download this HTML file to use it locally on your computer:</p>
-                <button class="download-button" onclick="downloadDashboard()">
-                    📄 Download Dashboard HTML
-                </button>
+                <p>Always up-to-date version hosted on GitHub. Some hosts block embedding in an iframe; use the button below to open it, then choose <strong>File → Save Page As…</strong> to download the HTML.</p>
+                <button class="download-button" style="display:inline-block;text-align:center;" onclick="downloadLatestDashboard()">Download latest dashboard HTML</button>
+                <div style="margin-top:8px; font-size:0.9rem; color:#6b7280;">Having trouble? <a target="_blank" href="https://raw.githubusercontent.com/bethanyou/Child-Social-Network-Questionnaire/809a430667d56d920aedc6d5a046223c92c45e5d/dashboard.html">Open the file</a> then save it (File → Save Page As…).</div>
             </div>
 
             <!-- Admin gate for uploads -->
@@ -2382,7 +2399,7 @@
             <div class="sidebar" id="wholeDataSidebar" style="">
                 <div class="header">
                     <div class="header-title-row">
-                        <img class="header-logo" alt="CSNQ Logo" src="https://raw.githubusercontent.com/bethanyou/Child-Social-Network-Questionnaire/eee2dbc25a6bc5972e9bc5d9f630c785bd9a9f51/Logo2.png" />
+                        <img class="header-logo" alt="CSNQ Logo" src="https://raw.githubusercontent.com/bethanyou/Child-Social-Network-Questionnaire/135c61cc0d8aceadfe725e3a689be35eae3b49d9/logo3-removebg-preview.png" />
                         <h1>SNQ Network Plotting Dashboard</h1>
                     </div>
                     <div class="subtitle">Whole Data Exploration</div>
@@ -2558,7 +2575,7 @@
             <div class="header">
                 <div class="header-title-row">
                     <h1>SNQ Network Plotting Dashboard</h1>
-                    <img class="header-logo" alt="CSNQ Logo" src="https://raw.githubusercontent.com/bethanyou/Child-Social-Network-Questionnaire/eee2dbc25a6bc5972e9bc5d9f630c785bd9a9f51/Logo2.png" />
+                    <img class="header-logo" alt="CSNQ Logo" src="https://raw.githubusercontent.com/bethanyou/Child-Social-Network-Questionnaire/135c61cc0d8aceadfe725e3a689be35eae3b49d9/logo3-removebg-preview.png" />
                 </div>
                 <div class="subtitle" onclick="showHelp()" style="cursor: pointer; text-decoration: underline;">Help &amp; Tips</div>
             </div>
@@ -4414,6 +4431,27 @@
                 if (gate) gate.style.display = 'none';
             } else {
                 if (msg) msg.textContent = 'Invalid password. Please try again.';
+            }
+        }
+
+        async function downloadLatestDashboard() {
+            // Always pull from GitHub main so updates are reflected immediately
+            const base = 'https://raw.githubusercontent.com/bethanyou/Child-Social-Network-Questionnaire/main/dashboard.html';
+            const url = `${base}?_=${Date.now()}`; // cache bust
+            try {
+                const res = await fetch(url, { cache: 'no-store' });
+                if (!res.ok) throw new Error('Network response was not ok');
+                const blob = await res.blob();
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(blob);
+                a.download = 'SNQ_Dashboard.html';
+                document.body.appendChild(a);
+                a.click();
+                URL.revokeObjectURL(a.href);
+                document.body.removeChild(a);
+            } catch (e) {
+                // Fallback to opening in new tab if direct download fails
+                window.open(url, '_blank');
             }
         }
 
