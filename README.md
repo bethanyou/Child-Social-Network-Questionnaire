@@ -1,10 +1,12 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/bethanyou/Child-Social-Network-Questionnaire/135c61cc0d8aceadfe725e3a689be35eae3b49d9/logo3-removebg-preview.png" 
+       alt="Child Social Network Questionnaire Logo" 
+       width="240">
+</p>
+
 # SNQ Distribution Hub 
 Shiny application for processing and visualizing Child Social Network Questionnaire (CSNQ) data.: https://csnq.shinyapps.io/csnq-dashboard/#home (deployed using app.R)
-<img
-  src="https://raw.githubusercontent.com/bethanyou/Child-Social-Network-Questionnaire/135c61cc0d8aceadfe725e3a689be35eae3b49d9/logo3-removebg-preview.png"
-  alt="Child Social Network Questionnaire Logo"
-  style="display:block; margin:auto; max-width:240px; height:auto;"
->
+
 
 
 ## Features
