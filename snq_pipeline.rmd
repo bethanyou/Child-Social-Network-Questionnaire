@@ -5,7 +5,7 @@ date: "2025-10-07"
 output: html_document
 ---
 # load necessary packages
-```{r}
+```{r package loading}
 suppressPackageStartupMessages({
   library(readxl)
   library(dplyr)
@@ -34,10 +34,9 @@ suppressPackageStartupMessages({
 
 ```
 
-```{r}
-# =============================================================================
+```{r overview}
+
 # DATA MODEL OVERVIEW
-# =============================================================================
 # Tables produced by this pipeline:
 #   • node_level_long               — alter-level; one row per relationship (alter).
 #   • ego_level_network_summary     — child-level; one row per child (ego).
@@ -45,9 +44,10 @@ suppressPackageStartupMessages({
 
 # load data 
 ```{r load data}
+setwd("path_to_your_working_directory")
 # (get rid of the metadata rows from Qualtrics)
 df <- read_csv(
-  '/Users/beiniou/Desktop/SNQ Pipeline/Social+Network+Questionnaire+-+Bethany+working_October+28,+2025_23.51.csv',
+  "insert_Qualtrics_csv_here",
   show_col_types = FALSE
 ) %>%
   slice(-(1:2)) 
@@ -56,164 +56,18 @@ df <- read_csv(
 
 # 1: Building ego_level_network_summary: Phase 1 (Demographics of each nodes)
 ```{r ego_demographics_in_ego_level_network_summary}
+DIGITS_AGE <- 0  # reserved for later use
 
-ego_level_network_summary <- df %>%
-  mutate(
-    # --- Merge childcare "other" text where present (robust to missing column) ---
-    childcare_type = {
-      # If the free-text column does not exist, treat as all-NA
-      other_exists <- "childcare_type_8_TEXT" %in% names(.)
-      other_text <- if (other_exists) childcare_type_8_TEXT else NA_character_
-      other_text <- ifelse(is.na(other_text) | trimws(other_text) == "", NA_character_, trimws(other_text))
-      base_val <- ifelse(is.na(childcare_type) | childcare_type == "", NA_character_, childcare_type)
-      out <- ifelse(is.na(base_val) & !is.na(other_text), other_text, base_val)
-      both <- !is.na(base_val) & !is.na(other_text)
-      out[both] <- paste(base_val[both], other_text[both], sep = ", ")
-      out
-    },
-
-    # --- Childcare race: keep main selection; store free text separately ---
-    childcare_race_other = ifelse(!is.na(childcare_race_7_TEXT) & trimws(childcare_race_7_TEXT) != "",
-                                  trimws(childcare_race_7_TEXT), NA_character_),
-
-    # --- Child gender: prefer text-entry (Other) when present ---
-    child_gender = ifelse(!is.na(child_gender_3_TEXT) & trimws(child_gender_3_TEXT) != "",
-                          trimws(child_gender_3_TEXT), child_gender),
-
-    # --- Child race: keep main selection; store free text separately ---
-    child_race_other = ifelse(!is.na(child_race_6_TEXT) & trimws(child_race_6_TEXT) != "",
-                              trimws(child_race_6_TEXT), NA_character_),
-
-    # --- Child language: keep as-is, no modifications needed ---
-  ) %>%
-  rowwise() %>%
-  mutate(
-    # --- Child accent: build two outputs per row ---
-    child_accent_categorized = {
-      s <- tolower(as.character(child_accent))
-      if (is.na(s) || trimws(s) == "") {
-        NA_character_
-      } else {
-        labs <- character(0)
-        if (grepl("european", s)) labs <- c(labs, "European")
-        if (grepl("asian", s))    labs <- c(labs, "Asian")
-        if (grepl("regional", s)) labs <- c(labs, "Regional U.S.")
-        if (length(labs) == 0) NA_character_ else paste(labs, collapse = ", ")
-      }
-    },
-    child_accent_specific = {
-      s <- tolower(as.character(child_accent))
-      specs <- character(0)
-      if (!is.na(s) && grepl("british", s))  specs <- c(specs, "British")
-      if (!is.na(s) && grepl("hispanic", s)) specs <- c(specs, "Hispanic")
-      t3 <- trimws(as.character(child_accent_3_TEXT)); if (!is.na(t3) && nzchar(t3)) specs <- c(specs, t3)
-      t4 <- trimws(as.character(child_accent_4_TEXT)); if (!is.na(t4) && nzchar(t4)) specs <- c(specs, t4)
-      t5 <- trimws(as.character(child_accent_5_TEXT)); if (!is.na(t5) && nzchar(t5)) specs <- c(specs, t5)
-      t6 <- trimws(as.character(child_accent_6_TEXT)); if (!is.na(t6) && nzchar(t6)) specs <- c(specs, t6)
-      specs <- unique(specs)
-      if (length(specs) == 0) NA_character_ else paste(specs, collapse = "; ")
-    },
-
-    # --- Round to whole numbers ---
-    childcare_start_age = suppressWarnings(round(as.numeric(childcare_start_age), 0)),
-    childcare_size      = suppressWarnings(round(as.numeric(childcare_size), 0))
-  ) %>%
-  ungroup() %>%
-  select(
-    ChildID, child_name, EndDate, Finished,
-    birthdate_1, age_in_months_1,
-    child_gender, child_race, child_race_other, child_race_detail,
-    child_lang, 
-    child_accent_categorized, child_accent_specific,
-    child_zipcode,
-    childcare_yn, childcare_type,
-    childcare_start_age, childcare_size,
-    name_filloutsurvey
-  ) %>%
-  rename(
-    child_birthdate   = birthdate_1,
-    child_age_in_months = age_in_months_1,
-    survey_respondent = name_filloutsurvey
-  ) %>%
-  rename(
-    survey_enddate = EndDate,
-    survey_completion = Finished
-  ) %>%
-  mutate(
-    # --- Fix survey_enddate to MM/DD/YYYY ---
-    survey_enddate = {
-      end_num <- suppressWarnings(as.numeric(survey_enddate))
-      out <- rep(NA_character_, length(survey_enddate))
-
-      # Numeric (Excel serial) -> Date
-      idx_num <- !is.na(end_num)
-      if (any(idx_num)) {
-        out[idx_num] <- format(as.Date(end_num[idx_num], origin = "1899-12-30"), "%m/%d/%Y")
-      }
-
-      # Non-numeric -> try ymd_hms, then ymd
-      idx_chr <- !idx_num
-      if (any(idx_chr)) {
-        dt <- suppressWarnings(lubridate::ymd_hms(survey_enddate[idx_chr], tz = "UTC"))
-        miss <- is.na(dt)
-        if (any(miss)) {
-          dt[miss] <- suppressWarnings(lubridate::ymd(survey_enddate[idx_chr][miss], tz = "UTC"))
-        }
-        out[idx_chr] <- format(as.Date(dt), "%m/%d/%Y")
-      }
-      out
-    },
-
-    # --- Clean childcare_type to new canonical labels ---
-    # Canonicals: "Daycare center", "Family daycare", "Relative cares",
-    #             "Child care provider", "Other"
-    childcare_type = {
-      s <- childcare_type
-      # Remove any parenthetical examples and embedded Qualtrics tokens
-      s <- gsub("\\s*\\([^)]*\\)", "", s, perl = TRUE)
-      s <- gsub("\\$\\{[^}]+\\}", "", s, perl = TRUE)
-      parts <- strsplit(s, ",", fixed = TRUE)
-      vapply(parts, function(v) {
-        v <- trimws(v)
-        v <- v[nzchar(v)]
-        if (!length(v)) return(NA_character_)
-        # Normalize each token to one of the five canonical labels
-        v_norm <- vapply(v, function(tok) {
-          t <- trimws(tok)
-          t <- sub("^Other, \\(?please specify\\)?:?\\s*", "Other", t, ignore.case = TRUE, perl = TRUE)
-          t <- gsub("'s own home$", "", t)
-          if (grepl("^daycare\\s*center$", t, ignore.case = TRUE)) {
-            "Daycare center"
-          } else if (grepl("^family\\s*daycare$", t, ignore.case = TRUE)) {
-            "Family daycare"
-          } else if (grepl("^relative", t, ignore.case = TRUE)) {
-            "Relative cares"
-          } else if (grepl("^child\\s*care\\s*provider", t, ignore.case = TRUE)) {
-            "Child care provider"
-          } else if (grepl("^other$", t, ignore.case = TRUE)) {
-            "Other"
-          } else {
-            t
-          }
-        }, character(1))
-        # De-duplicate while preserving order
-        seen <- character(0)
-        for (t in v_norm) if (!(t %in% seen)) seen <- c(seen, t)
-        paste(seen, collapse = ", ")
-      }, character(1))
-    },
-
-    # --- Child language: keep as-is, no categorization needed ---
-  )
-
-```
-
-# 2: Node processing into node_level_long
-## helper functions cleaning data
-```{r}
-DIGITS_AGE <- 0
-
-# Safely pull a column; if missing, return NAs of the right type
+# pull_safe(df, col, type)
+# What it does:
+#   Safely pull a column from a data frame.
+#   If the column does not exist, return the right type of NAs.
+# Why:
+#   Prevents code from breaking when a column is missing.
+# Inputs:
+#   df   = data frame
+#   col  = column name (string)
+#   type = "character", "double", "integer", "logical", "datetime"
 pull_safe <- function(df, col, type = "character") {
   if (!col %in% names(df)) {
     return(switch(
@@ -236,36 +90,56 @@ pull_safe <- function(df, col, type = "character") {
   )
 }
 
-# Turn blanks "" into NA (keep multiple-choice fields tidy)
+# na_blank(x)
+# Turn empty strings "" into NA.
+# Why:
+#   Keeps multiple choice text fields tidy and consistent.
 na_blank <- function(x) {
   x <- as.character(x)
   x[str_trim(x) == ""] <- NA_character_
   x
 }
 
-# Parse flexible DOB → Date (used by sibling age in months)
+# parse_dob_flexible(x)
+# Parse a wide range of date formats into Date.
+# Accepts:
+#   "YYYY-MM-DD", "MM/DD/YYYY", "DD.MM.YYYY", "YYYY", "YYYY-MM", "MM-YYYY"
+# If only year is given, set month and day to midpoints so age math works.
+# If year and month are given, set day to the 15th.
+# Output is Date.
 parse_dob_flexible <- function(x) {
   x <- str_trim(as.character(x)); x[x == ""] <- NA_character_
   x_norm <- str_replace_all(str_replace_all(x, "[.]", "-"), "/", "-")
   dob <- suppressWarnings(lubridate::parse_date_time(
-    x_norm, orders = c("Ymd","dmY","mdY","Y-m","m-Y","Ym","my","Y"), tz="UTC", exact = FALSE
+    x_norm,
+    orders = c("Ymd","dmY","mdY","Y-m","m-Y","Ym","my","Y"),
+    tz = "UTC",
+    exact = FALSE
   ))
+
   only_year  <- !is.na(dob) & str_detect(x_norm, "^\\d{4}$")
-  dob[only_year] <- make_datetime(year(dob[only_year]), 6, 15, tz="UTC")
+  dob[only_year] <- make_datetime(year(dob[only_year]), 6, 15, tz = "UTC")
+
   month_year <- !is.na(dob) & str_detect(x_norm, "^\\d{4}-\\d{1,2}$|^\\d{1,2}-\\d{4}$")
-  dob[month_year] <- make_datetime(year(dob[month_year]), month(dob[month_year]), 15, tz="UTC")
+  dob[month_year] <- make_datetime(year(dob[month_year]), month(dob[month_year]), 15, tz = "UTC")
+
   as.Date(dob)
 }
 
-# Parse Qualtrics EndDate string
+# parse_enddate(x)
+# Parse Qualtrics EndDate strings into POSIXct.
+# Tries full datetime first, then tries date only.
 parse_enddate <- function(x) {
-  d1 <- suppressWarnings(ymd_hms(x, tz="UTC"))
+  d1 <- suppressWarnings(ymd_hms(x, tz = "UTC"))
   d1_na <- is.na(d1)
-  if (any(d1_na)) d1[d1_na] <- suppressWarnings(ymd(x[d1_na], tz="UTC"))
+  if (any(d1_na)) d1[d1_na] <- suppressWarnings(ymd(x[d1_na], tz = "UTC"))
   d1
 }
 
-# Normalize yes/no style answers into 1/0/NA
+# recode_yn_na(x)
+# Normalize many yes or no styles into 1 or 0.
+# Returns NA for not applicable or blank.
+# If it looks like a number, return that number.
 recode_yn_na <- function(x) {
   x <- str_trim(str_to_lower(as.character(x)))
   dplyr::case_when(
@@ -276,12 +150,17 @@ recode_yn_na <- function(x) {
   )
 }
 
-# Hours per week → percent of week (168h)
+# percent_of_week(hours_vec)
+# Convert hours per week to percent of a 168 hour week.
+# Caps at 100. Rounds to whole percent.
 percent_of_week <- function(hours_vec) {
   ifelse(!is.na(hours_vec), round(pmin((hours_vec / 168) * 100, 100), 0), NA_real_)
 }
 
-# Accent helpers must be defined before node processors use them
+# accent_categorize_from(main_choice)
+# Read a broad accent choice and return simple buckets.
+# Looks for words like "European", "Asian", "Regional U.S."
+# Returns labels joined by comma, or NA if nothing found.
 accent_categorize_from <- function(main_choice) {
   s_vec <- as.character(main_choice)
   vapply(s_vec, function(one) {
@@ -296,75 +175,104 @@ accent_categorize_from <- function(main_choice) {
   }, character(1))
 }
 
+# accent_specific_from(main_choice, t3, t4, t5, t6)
+# Build a semicolon list of specific accent tags.
+# Takes a main choice plus up to four text fields for detail.
+# Removes duplicates. Returns NA if nothing is present.
 accent_specific_from <- function(main_choice, t3, t4, t5, t6) {
   n <- max(length(main_choice), length(t3), length(t4), length(t5), length(t6))
   main_choice <- rep_len(main_choice, n)
   t3 <- rep_len(t3, n); t4 <- rep_len(t4, n); t5 <- rep_len(t5, n); t6 <- rep_len(t6, n)
+
   vapply(seq_len(n), function(i) {
     s <- tolower(as.character(main_choice[i]))
     specs <- character(0)
+
     if (!is.na(s) && grepl("british",  s, ignore.case = TRUE)) specs <- c(specs, "British")
     if (!is.na(s) && grepl("hispanic", s, ignore.case = TRUE)) specs <- c(specs, "Hispanic")
-    add_spec <- function(x) { x <- trimws(as.character(x)); if (!is.na(x) && nzchar(x)) specs <<- c(specs, x) }
+
+    add_spec <- function(x) {
+      x <- trimws(as.character(x))
+      if (!is.na(x) && nzchar(x)) specs <<- c(specs, x)
+    }
     add_spec(t3[i]); add_spec(t4[i]); add_spec(t5[i]); add_spec(t6[i])
+
     specs <- unique(specs)
     if (!length(specs)) return(NA_character_)
     paste(specs, collapse = "; ")
   }, character(1))
 }
 
-# ====== REPLACE your build_mapping_code with these two helpers ======
+# sanitize_name_for_code(x)
+# Clean a name so it is safe to use inside a code string.
+# Replace non letters and numbers with underscores.
+# Collapse repeats and trim edges.
 sanitize_name_for_code <- function(x) {
-  # to character; empty -> "NA"; strip non-alphanumerics; collapse runs
   s <- as.character(x)
   s[is.na(s) | stringr::str_trim(s) == ""] <- "NA"
-  s <- gsub("[^A-Za-z0-9]+", "_", s)       # any punctuation/space -> underscore
-  s <- gsub("^_+|_+$", "", s)              # trim leading/trailing underscores
-  s <- gsub("_+", "_", s)                  # collapse multiple underscores
+  s <- gsub("[^A-Za-z0-9]+", "_", s)
+  s <- gsub("^_+|_+$", "", s)
+  s <- gsub("_+", "_", s)
   s
 }
 
+# build_node_code(prefix, idx, name_vec)
+# Make a stable code like "Sibling3_Emma" using:
+#   prefix = role group
+#   idx    = sequence number
+#   name   = cleaned by sanitize_name_for_code
 build_node_code <- function(prefix, idx, name_vec) {
   paste0(prefix, as.integer(idx), "_", sanitize_name_for_code(name_vec))
 }
 
-# Ego fields pulled once per row block (Child-level info)
+# ego_fields(ego_level_network_summary)
+# Pull core child fields once per row block for merges and summaries.
+# If a field is missing, return NA in the right type.
 ego_fields <- function(ego_level_network_summary) {
   list(
     ChildID           = na_blank(pull_safe(ego_level_network_summary, "ChildID")),
-    ego_age_in_months = suppressWarnings(as.numeric(pull_safe(ego_level_network_summary, "child_age_in_months", type="double"))),
-    ego_gender        = dplyr::coalesce(na_blank(pull_safe(ego_level_network_summary, "child_gender")),
-                                        na_blank(pull_safe(ego_level_network_summary, "child_gender_3_TEXT"))),
-    # Keep ego_race as the main selection only; do not append text
+    ego_age_in_months = suppressWarnings(as.numeric(pull_safe(ego_level_network_summary, "child_age_in_months", type = "double"))),
+    ego_gender        = dplyr::coalesce(
+      na_blank(pull_safe(ego_level_network_summary, "child_gender")),
+      na_blank(pull_safe(ego_level_network_summary, "child_gender_3_TEXT"))
+    ),
+    # Keep only the main race selection. Do not append write-in text.
     ego_race          = na_blank(pull_safe(ego_level_network_summary, "child_race")),
     ego_language      = na_blank(pull_safe(ego_level_network_summary, "child_lang"))
   )
 }
 
-# Vectorized cleaner: accepts a character vector; returns normalized, de-duplicated labels
+# clean_context_vec(x)
+# Normalize free text context into a short, standard set.
+# Examples of outputs: "At home", "Daycare/School", "Extended Family", "Activity 1"
+# Steps:
+#   1) Trim and squash spaces
+#   2) Expand Qualtrics tokens like ${e://Field/Activity2} into "Activity 2"
+#   3) Map loose phrases to standard labels
+#   4) Collect all matches per entry and join with comma
 clean_context_vec <- function(x) {
   if (is.null(x)) return(rep(NA_character_, 0))
   x <- as.character(x)
-  
-  # Normalize whitespace & separators early
+
+  # Normalize whitespace
   x <- str_replace_all(x, "[\r\n]+", " ")
   x <- str_squish(x)
-  
-  # Expand Qualtrics tokens and loose activity variants to "Activity N"
+
+  # Expand Qualtrics tokens and loose "activity" variants
   x <- str_replace_all(x, "\\$\\{e://Field/Activity\\s*([0-9]{1,2})\\}", "Activity \\1")
   x <- str_replace_all(x, "(?i)\\bactivity\\s*0*([1-7])\\b", "Activity \\1")
-  
-  # Canonicalize base contexts (case-insensitive)
+
+  # Detect base contexts
   at_home      <- str_detect(x, "(?i)\\bat\\s*home\\b")
   daycare_any  <- str_detect(x, "(?i)\\bday\\s*care\\b|\\bdaycare\\b|\\bschool\\b")
   ext_family   <- str_detect(x, "(?i)\\bextended\\s*family\\b")
-  
-  # Extract all "Activity N"
+
+  # Extract "Activity N"
   acts <- lapply(
     str_extract_all(x, "\\bActivity\\s*([1-7])\\b"),
     function(v) if (length(v)) unique(str_squish(v)) else character(0)
   )
-  
+
   out <- character(length(x))
   for (i in seq_along(x)) {
     tokens <- character(0)
@@ -372,13 +280,17 @@ clean_context_vec <- function(x) {
     if (isTRUE(daycare_any[i])) tokens <- c(tokens, "Daycare/School")
     if (isTRUE(ext_family[i]))  tokens <- c(tokens, "Extended Family")
     if (length(acts[[i]]))      tokens <- c(tokens, acts[[i]])
+
     tokens <- unique(tokens)
     out[i] <- if (length(tokens)) paste(tokens, collapse = ", ") else NA_character_
   }
   out
 }
 
-# Counter that tolerates comma OR semicolon, trims, and ignores empties
+# count_contexts_vec(ctx)
+# Count how many contexts are listed in each entry.
+# Accepts comma or semicolon separators.
+# Returns an integer count per row.
 count_contexts_vec <- function(ctx) {
   if (is.null(ctx)) return(integer(0))
   ctx <- as.character(ctx)
@@ -435,7 +347,6 @@ process_liveathome <- function(df, ego_level_network_summary, i) {
   node_weekly_hour_summarized[is.nan(node_weekly_hour_summarized)] <- NA_real_
   node_weekly_hour_percent <- percent_of_week(node_weekly_hour_summarized)
   
-  node_age_in_months   <- NA_real_
   node_age_categorized <- age_raw
   
   node_gender   <- dplyr::coalesce(gender_main, gender_text)
@@ -481,7 +392,6 @@ process_liveathome <- function(df, ego_level_network_summary, i) {
     node_weekly_hour_summarized = node_weekly_hour_summarized,
     node_weekly_hour_percent    = node_weekly_hour_percent,
     
-    node_age_in_months   = node_age_in_months,
     node_age_categorized = node_age_categorized,
     
     node_gender          = node_gender,
@@ -599,7 +509,6 @@ process_teacher <- function(df, ego_level_network_summary, i) {
     node_weekly_hour_summarized = node_weekly_hour_summarized,
     node_weekly_hour_percent    = node_weekly_hour_percent,
     
-    node_age_in_months   = NA_real_,
     node_age_categorized = age_cat_raw,
     
     node_gender = node_gender,
@@ -715,7 +624,6 @@ process_schoolkid <- function(df, ego_level_network_summary, i) {
     node_weekly_hour_summarized = node_weekly_hour_summarized,
     node_weekly_hour_percent    = node_weekly_hour_percent,
     
-    node_age_in_months   = NA_real_,
     node_age_categorized = age_cat_raw,
     
     node_gender = node_gender,
@@ -833,7 +741,6 @@ process_caregiver <- function(df, ego_level_network_summary, i) {
     node_weekly_hour_summarized = node_weekly_hour_summarized,
     node_weekly_hour_percent    = node_weekly_hour_percent,
     
-    node_age_in_months   = NA_real_,
     node_age_categorized = age_cat_raw,
     
     node_gender = node_gender,
@@ -949,7 +856,6 @@ process_extendedfamily <- function(df, ego_level_network_summary, i) {
     node_weekly_hour_summarized = node_weekly_hour_summarized,
     node_weekly_hour_percent    = node_weekly_hour_percent,
     
-    node_age_in_months   = NA_real_,
     node_age_categorized = age_cat_raw,
     
     node_gender = node_gender,
@@ -1064,7 +970,6 @@ process_anyoneelse <- function(df, ego_level_network_summary, i) {
     node_weekly_hour_summarized = node_weekly_hour_summarized,
     node_weekly_hour_percent    = node_weekly_hour_percent,
     
-    node_age_in_months   = NA_real_,
     node_age_categorized = age_cat_raw,
     
     node_gender = node_gender,
@@ -1182,7 +1087,6 @@ process_activity_adult <- function(df, ego_level_network_summary, act_id, i) {
     node_weekly_hour_summarized = node_weekly_hour_summarized,
     node_weekly_hour_percent    = node_weekly_hour_percent,
     
-    node_age_in_months   = NA_real_,
     node_age_categorized = age_cat_raw,
     
     node_gender = node_gender,
@@ -1299,8 +1203,6 @@ process_activity_kid <- function(df, ego_level_network_summary, act_id, i) {
     node_weekly_hour        = node_weekly_hour,
     node_weekly_hour_summarized = node_weekly_hour_summarized,
     node_weekly_hour_percent    = node_weekly_hour_percent,
-    
-    node_age_in_months   = NA_real_,
     node_age_categorized = age_cat_raw,
     
     node_gender = node_gender,
@@ -1369,23 +1271,42 @@ node_level_long <- bind_rows(
 ) %>%
   distinct() %>%
   arrange(ChildID, node_type, node_index)
+
+node_level_long <- node_level_long %>%
+  rename(node_closeness_scale = node_clarify)
 ```
 
 # 3: Network Summaries
 
 ```{r summary helpers}
-
+# ================================
 # Helpers (language parsing, race normalization, entropy)
-# Keep helpers in one place; avoid hidden globals later in the script.
+# Keep helpers in one place to avoid hidden globals and scattered logic.
+# Notes are short and concrete so anyone can understand what each helper does.
+# ================================
 
-# Used to strip out the "not a language" meta choice from Qualtrics.
+# LANG_META_EXACT
+# Purpose: a single label used in Qualtrics to mean “this is not a language”.
+# We drop this token during language parsing.
 LANG_META_EXACT <- "preverbal/nonverbal"
 
-# Conservative splitter for languages. We:
-#  - split on comma/semicolon
-#  - trim whitespace
-#  - drop the meta option (case-insensitive)
-#  - return unique tokens
+# --------------------------------
+# parse_langs_clean(s)
+# Purpose:
+#   Turn a single text field like "English; Spanish, Mandarin" into a clean
+#   character vector of languages without duplicates.
+# What it does:
+#   1) Returns character(0) for missing or blank input.
+#   2) Splits on commas and semicolons.
+#   3) Trims spaces around each token.
+#   4) Drops empty tokens.
+#   5) Drops the exact meta option (case-insensitive), which is not a language.
+#   6) Returns unique tokens.
+# When to use:
+#   Use this for general summaries, counts, and entropy calculations.
+# Example:
+#   parse_langs_clean(" English; Spanish , preverbal/nonverbal ")
+#   -> c("English", "Spanish")
 parse_langs_clean <- function(s) {
   if (is.na(s) || !nzchar(trimws(s))) return(character(0))
   toks <- unlist(strsplit(s, "[,;]"))
@@ -1395,22 +1316,21 @@ parse_langs_clean <- function(s) {
   unique(toks)
 }
 
-# Exact tokenization for EI work:
-#  - remove leading labels like "Multilingual:", "Bilingual:", "Exposure:"
-#  - split on comma/semicolon
-#  - same meta drop as above
-.parse_langs_exact <- function(s) {
-  if (is.na(s) || !nzchar(trimws(s))) return(character(0))
-  s <- gsub("^\\s*(multilingual|bilingual|exposure)\\s*:\\s*", "", s,
-            ignore.case = TRUE, perl = TRUE)
-  toks <- unlist(strsplit(s, "[,;]"))
-  toks <- stringr::str_trim(toks)
-  toks <- toks[nzchar(toks)]
-  toks <- toks[!tolower(toks) %in% tolower(LANG_META_EXACT)]
-  unique(toks)
-}
 
-# ---- Accent helpers (shared by ego and node) ----
+# --------------------------------
+# Accent helpers (shared by ego and node)
+# These helpers build two levels of accent information:
+#   1) A broad category label (European, Asian, Regional U.S.)
+#   2) A semicolon list of specific labels (for example: "British; Hispanic")
+
+# accent_categorize_from(main_choice)
+# Purpose:
+#   Map a main accent choice to one or more broad groups.
+# What it does:
+#   - Returns NA if the field is blank.
+#   - Looks for keywords and returns a comma list of broad labels.
+# Notes:
+#   It can return more than one label if multiple keywords are present.
 accent_categorize_from <- function(main_choice) {
   s_vec <- as.character(main_choice)
   vapply(s_vec, function(one) {
@@ -1425,6 +1345,18 @@ accent_categorize_from <- function(main_choice) {
   }, character(1))
 }
 
+# accent_specific_from(main_choice, t3, t4, t5, t6)
+# Purpose:
+#   Keep specific accent details from the main choice and up to four
+#   additional fields. Produces a semicolon list.
+# What it does:
+#   - Recycles inputs to the same length.
+#   - Adds "British" or "Hispanic" if seen in the main choice.
+#   - Adds any non-empty text from t3 to t6.
+#   - Removes duplicates and returns a single string or NA.
+# Example:
+#   accent_specific_from("British", "London", "", "Hispanic", "")
+#   -> "British; Hispanic; London"
 accent_specific_from <- function(main_choice, t3, t4, t5, t6) {
   n <- max(length(main_choice), length(t3), length(t4), length(t5), length(t6))
   main_choice <- rep_len(main_choice, n)
@@ -1434,7 +1366,10 @@ accent_specific_from <- function(main_choice, t3, t4, t5, t6) {
     specs <- character(0)
     if (!is.na(s) && grepl("british",  s, ignore.case = TRUE)) specs <- c(specs, "British")
     if (!is.na(s) && grepl("hispanic", s, ignore.case = TRUE)) specs <- c(specs, "Hispanic")
-    add_spec <- function(x) { x <- trimws(as.character(x)); if (!is.na(x) && nzchar(x)) specs <<- c(specs, x) }
+    add_spec <- function(x) {
+      x <- trimws(as.character(x))
+      if (!is.na(x) && nzchar(x)) specs <<- c(specs, x)
+    }
     add_spec(t3[i]); add_spec(t4[i]); add_spec(t5[i]); add_spec(t6[i])
     specs <- unique(specs)
     if (!length(specs)) return(NA_character_)
@@ -1442,9 +1377,25 @@ accent_specific_from <- function(main_choice, t3, t4, t5, t6) {
   }, character(1))
 }
 
+# --------------------------------
 # Race normalization
-# You will not get perfect harmonization across free text, but a consistent,
-# documented mapping is better than ad-hoc string compares downstream.
+# Goal:
+#   Free text race entries vary. We apply a consistent and documented mapping
+#   into a small set of categories. This avoids ad hoc string checks later.
+
+# .normalize_race_token(tok)
+# Purpose:
+#   Map a single token to one standardized race label or NA.
+# What it does:
+#   - Lowercases, removes punctuation, and squeezes spaces.
+#   - Treats empty or “prefer not to answer” style responses as NA.
+#   - Maps to: White; Black or African American; Asian;
+#              American Indian or Alaska Native;
+#              Native Hawaiian or Other Pacific Islander;
+#              Hispanic or Latino; Middle Eastern or North African;
+#              Multiracial; Other.
+# Notes:
+#   We keep an explicit “Other” so nothing disappears silently.
 .normalize_race_token <- function(tok) {
   if (is.na(tok)) return(NA_character_)
   t <- tolower(trimws(as.character(tok)))
@@ -1460,12 +1411,22 @@ accent_specific_from <- function(main_choice, t3, t4, t5, t6) {
     grepl("hispanic|latino|latina|latinx|mexic|puerto|cuban|chican", t) ~ "Hispanic/Latino",
     grepl("middle\\s*eastern|north\\s*africa|mena|arab",     t) ~ "Middle Eastern/North African",
     grepl("biracial|multi\\s*rac",                           t) ~ "Multiracial",
-    TRUE ~ "Other"  # explicit catch-all; avoids silently dropping anything else
+    TRUE ~ "Other"  # explicit catch-all; keeps unexpected inputs visible
   )
 }
 
-# Tokenize + normalize a single value that may contain multiple races.
-# Splits on commas/semicolons/slashes/& and the word "and".
+# .tokenize_race_norm(x)
+# Purpose:
+#   Split a single field that may contain multiple race mentions into
+#   a clean set of standardized categories.
+# What it does:
+#   - Splits on commas, semicolons, slashes, ampersands, and the word "and".
+#   - Trims and drops empty pieces.
+#   - Normalizes each token with .normalize_race_token.
+#   - Removes duplicates and drops NA.
+# Example:
+#   .tokenize_race_norm("Asian and White; Hispanic/Latino")
+#   -> c("Asian", "White", "Hispanic/Latino")
 .tokenize_race_norm <- function(x) {
   if (is.null(x) || (length(x) == 1 && is.na(x))) return(character(0))
   toks <- unlist(strsplit(as.character(x), "[,;/&]|\\band\\b", perl = TRUE))
@@ -1474,15 +1435,28 @@ accent_specific_from <- function(main_choice, t3, t4, t5, t6) {
   unique(na.omit(out))
 }
 
-# Entropy in bits. We:
-#  - drop NA / non-finite
-#  - ignore zero-prob bins (log(0) undefined)
+# --------------------------------
+# entropy_bits(p)
+# Purpose:
+#   Compute Shannon entropy in bits. Higher means more diversity.
+# Inputs:
+#   p is a numeric vector of probabilities that sum to 1.
+#   If you have counts, convert them to probabilities first.
+# What it does:
+#   - Converts to numeric.
+#   - Drops non-finite, NA, and non-positive entries.
+#   - Ignores zero bins (log of zero is undefined).
+#   - Returns -sum(p * log2(p)) or NA if nothing valid remains.
+# Example:
+#   counts <- c(5, 3, 2); props <- counts / sum(counts)
+#   entropy_bits(props)  # valid
 entropy_bits <- function(p) {
   p <- as.numeric(p)
   p <- p[is.finite(p) & !is.na(p) & p > 0]
   if (!length(p)) return(NA_real_)
   -sum(p * log2(p))
 }
+
 ```
 
 
@@ -1858,8 +1832,7 @@ cols_child_demo <- c(
 )
 
 cols_childcare <- c(
-  "childcare_yn", "childcare_type", "childcare_start_age", "childcare_size",
-  "childcare_child_age", "childcare_gender", "childcare_race", "childcare_race_other", "childcare_lang"
+  "childcare_yn", "childcare_type", "childcare_start_age", "childcare_size"
 )
 
 cols_child_lang <- c(
@@ -1922,9 +1895,6 @@ ego_level_network_summary <- ego_level_network_summary %>%
 
 # 5: Data Export into csv
 ```{r}
-# csv format is needed for plotting tool; disabled for preview runs
-if (FALSE) {
-  write.csv(ego_level_network_summary, file = "ego_level_network_summary.csv", row.names = FALSE)
-  write.csv(node_level_long, file = "node_level_long.csv", row.names = FALSE)
-}
+write.csv(ego_level_network_summary, "ego_level_network_summary.csv", row.names = FALSE)
+write.csv(node_level_long, "node_level_long.csv", row.names = FALSE)
 ```
